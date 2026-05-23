@@ -78,6 +78,18 @@ sync:
   #   APPLE: 1       # Apple (by purchaseSourceType)
   #   MANUALLY_ADDED: 2
 
+  # Never overwrite existing purchase_date / order_number on update.
+  # First-time syncs still populate them. Useful if you manually correct
+  # order info in Snipe-IT after a sync and want it preserved on re-runs.
+  # preserve_order_info_on_update: false
+
+  # Sync ABM's order_date / order_number even for devices added via
+  # Apple Configurator (purchaseSourceType=MANUALLY_ADDED). By default
+  # we skip these because ABM emits a synthetic enrollment ID like
+  # "CE-2024-12-13-04-11-12-826" and the enrollment date — not the real
+  # purchase data — which would overwrite better data already in Snipe-IT.
+  # sync_configurator_order_info: false
+
   # Custom field mappings: Snipe-IT field name -> ABM attribute
   # Left side: Snipe-IT DB column name (e.g. _snipeit_fieldname_1)
   #            or standard Snipe-IT field (purchase_date, order_number)

@@ -65,6 +65,8 @@ type SyncConfig struct {
 	MDMOnlyCache     bool              `yaml:"mdm_only_cache"`    // also exclude non-MDM devices from cache (requires mdm_only)
 	SupplierMapping  map[string]int    `yaml:"supplier_mapping"`  // ABM purchaseSourceId or purchaseSourceType -> snipe supplier ID
 	ModelImages        bool              `yaml:"model_images"`         // fetch device images from appledb.dev for newly created models
+	PreserveOrderInfoOnUpdate bool       `yaml:"preserve_order_info_on_update"`  // never overwrite existing purchase_date / order_number on update
+	SyncConfiguratorOrderInfo bool       `yaml:"sync_configurator_order_info"`   // sync order_date / order_number even for MANUALLY_ADDED devices (default: skip, since ABM's values for these are Configurator enrollment metadata, not real purchase data)
 }
 
 // Load reads configuration from a YAML file and applies environment variable overrides.

@@ -2,6 +2,7 @@ package sync
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -332,9 +333,13 @@ func TestDiffAsset_SupplierDiff(t *testing.T) {
 }
 
 func TestDiffAsset_PurchaseDateDiff(t *testing.T) {
+	// Desired purchase_date is set via CustomFields (the workaround for
+	// upstream SnipeTime serialization); existing comes from a Snipe-IT
+	// GET response with the native PurchaseDate field populated.
 	e := &Engine{cfg: &config.Config{}}
-	desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
-	desired.PurchaseDate = &snipeit.SnipeTime{Time: time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)}
+	desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{
+		CustomFields: map[string]string{"purchase_date": "2024-06-15"},
+	}}
 
 	existing := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
 	existing.PurchaseDate = &snipeit.SnipeTime{Time: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)}
@@ -343,16 +348,17 @@ func TestDiffAsset_PurchaseDateDiff(t *testing.T) {
 	if diff == nil {
 		t.Fatal("diffAsset should detect purchase_date change")
 	}
-	if diff.PurchaseDate == nil || diff.PurchaseDate.Format("2006-01-02") != "2024-06-15" {
-		t.Errorf("diff.PurchaseDate = %v, want 2024-06-15", diff.PurchaseDate)
+	if got := diff.CustomFields["purchase_date"]; got != "2024-06-15" {
+		t.Errorf("diff.CustomFields[purchase_date] = %q, want 2024-06-15", got)
 	}
 }
 
 func TestDiffAsset_PurchaseDateUnchanged(t *testing.T) {
 	e := &Engine{cfg: &config.Config{}}
 	date := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
-	desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
-	desired.PurchaseDate = &snipeit.SnipeTime{Time: date}
+	desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{
+		CustomFields: map[string]string{"purchase_date": "2024-06-15"},
+	}}
 
 	existing := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
 	existing.PurchaseDate = &snipeit.SnipeTime{Time: date}
@@ -376,6 +382,163 @@ func TestDiffAsset_OrderNumberDiff(t *testing.T) {
 	}
 	if diff.OrderNumber != "NEW123" {
 		t.Errorf("diff.OrderNumber = %q, want NEW123", diff.OrderNumber)
+	}
+}
+
+// TestApplyFieldMapping_SkipsOrderForManuallyAdded verifies that ABM's
+// orderDateTime and orderNumber are NOT synced when the device was added
+// via Apple Configurator (purchaseSourceType=MANUALLY_ADDED). In that
+// case ABM's values are Configurator enrollment metadata (e.g.
+// "CE-2024-12-13-04-11-12-826" and the enrollment date), not the real
+// purchase data, and would overwrite better data already in Snipe-IT.
+// The sync.sync_configurator_order_info flag is an opt-in escape hatch.
+func TestApplyFieldMapping_SkipsOrderForManuallyAdded(t *testing.T) {
+	tests := []struct {
+		name              string
+		syncConfiguratorInfo bool
+		wantOrderNumber   string
+		wantDateInCF      bool
+	}{
+		{name: "default skip", syncConfiguratorInfo: false, wantOrderNumber: "", wantDateInCF: false},
+		{name: "opt-in sync", syncConfiguratorInfo: true, wantOrderNumber: "CE-2024-12-13-04-11-12-826", wantDateInCF: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := &Engine{cfg: &config.Config{
+				Sync: config.SyncConfig{
+					SyncConfiguratorOrderInfo: tt.syncConfiguratorInfo,
+					FieldMapping: map[string]string{
+						"purchase_date": "order_date",
+						"order_number":  "order_number",
+					},
+				},
+			}}
+			device := abmclient.Device{
+				OrgDevice: abm.OrgDevice{
+					Attributes: &abm.OrgDeviceAttributes{
+						OrderDateTime:      time.Date(2024, 12, 13, 0, 0, 0, 0, time.UTC),
+						OrderNumber:        "CE-2024-12-13-04-11-12-826",
+						PurchaseSourceType: abm.OrgDeviceAttributesPurchaseSourceType("MANUALLY_ADDED"),
+					},
+				},
+			}
+			asset := snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)}}
+			e.applyFieldMapping(&asset, device, nil)
+
+			if asset.OrderNumber != tt.wantOrderNumber {
+				t.Errorf("OrderNumber = %q, want %q", asset.OrderNumber, tt.wantOrderNumber)
+			}
+			_, gotDateInCF := asset.CustomFields["purchase_date"]
+			if gotDateInCF != tt.wantDateInCF {
+				t.Errorf("purchase_date in CustomFields = %v, want %v", gotDateInCF, tt.wantDateInCF)
+			}
+		})
+	}
+}
+
+// TestStripOrderInfoOnUpdate covers the preserve_order_info_on_update flag:
+// when enabled and the existing Snipe-IT asset already has order info, the
+// desired update must drop those fields so we don't overwrite manually
+// corrected data.
+func TestStripOrderInfoOnUpdate(t *testing.T) {
+	tests := []struct {
+		name           string
+		preserve       bool
+		existingOrder  string
+		existingDate   *snipeit.SnipeTime
+		desiredOrder   string
+		desiredDate    string
+		wantOrder      string
+		wantDateInCF   bool
+	}{
+		{
+			name:          "preserve off — overwrites everything",
+			preserve:      false,
+			existingOrder: "OLD",
+			existingDate:  &snipeit.SnipeTime{Time: time.Date(2024, 4, 3, 0, 0, 0, 0, time.UTC)},
+			desiredOrder:  "NEW",
+			desiredDate:   "2024-12-13",
+			wantOrder:     "NEW",
+			wantDateInCF:  true,
+		},
+		{
+			name:          "preserve on, existing populated — desired cleared",
+			preserve:      true,
+			existingOrder: "BBY01-806929230921",
+			existingDate:  &snipeit.SnipeTime{Time: time.Date(2024, 4, 3, 0, 0, 0, 0, time.UTC)},
+			desiredOrder:  "CE-2024-12-13-04-11-12-826",
+			desiredDate:   "2024-12-13",
+			wantOrder:     "",
+			wantDateInCF:  false,
+		},
+		{
+			name:          "preserve on, existing empty — desired kept (first sync)",
+			preserve:      true,
+			existingOrder: "",
+			existingDate:  nil,
+			desiredOrder:  "NEW",
+			desiredDate:   "2024-12-13",
+			wantOrder:     "NEW",
+			wantDateInCF:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{
+				CustomFields: map[string]string{"purchase_date": tt.desiredDate},
+			}}
+			desired.OrderNumber = tt.desiredOrder
+			existing := &snipeit.Asset{}
+			existing.OrderNumber = tt.existingOrder
+			existing.PurchaseDate = tt.existingDate
+
+			stripOrderInfoOnUpdate(desired, existing, tt.preserve)
+
+			if desired.OrderNumber != tt.wantOrder {
+				t.Errorf("OrderNumber = %q, want %q", desired.OrderNumber, tt.wantOrder)
+			}
+			_, gotDateInCF := desired.CustomFields["purchase_date"]
+			if gotDateInCF != tt.wantDateInCF {
+				t.Errorf("purchase_date in CustomFields = %v, want %v", gotDateInCF, tt.wantDateInCF)
+			}
+		})
+	}
+}
+
+// TestApplyFieldMapping_PurchaseDateWireFormat verifies that purchase_date
+// is serialized to JSON as "YYYY-MM-DD" (date-only), not as upstream
+// go-snipeit's default SnipeTime "YYYY-MM-DD HH:MM:SS" datetime format
+// which Snipe-IT's purchase_date validator rejects.
+func TestApplyFieldMapping_PurchaseDateWireFormat(t *testing.T) {
+	e := &Engine{cfg: &config.Config{
+		Sync: config.SyncConfig{
+			FieldMapping: map[string]string{"purchase_date": "order_date"},
+		},
+	}}
+	device := abmclient.Device{
+		OrgDevice: abm.OrgDevice{
+			Attributes: &abm.OrgDeviceAttributes{
+				OrderDateTime: time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC),
+			},
+		},
+	}
+	asset := snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)}}
+	e.applyFieldMapping(&asset, device, nil)
+
+	body, err := json.Marshal(asset)
+	if err != nil {
+		t.Fatalf("marshal asset: %v", err)
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal asset body: %v", err)
+	}
+	got, ok := parsed["purchase_date"]
+	if !ok {
+		t.Fatalf("purchase_date missing from JSON body: %s", body)
+	}
+	if got != "2024-06-15" {
+		t.Errorf("purchase_date wire format = %q, want %q (date-only)", got, "2024-06-15")
 	}
 }
 
@@ -519,22 +682,21 @@ func TestApplyFieldMapping(t *testing.T) {
 		}
 	}
 
-	// Native Snipe-IT fields: purchase_date and order_number must be routed
-	// to the top-level Asset struct fields, not into CustomFields.
-	if _, inCF := asset.CustomFields["purchase_date"]; inCF {
-		t.Errorf("purchase_date should not land in CustomFields")
-	}
+	// order_number routes to the native top-level Asset struct field, not
+	// CustomFields, so it lands in Snipe-IT's built-in "Order Information"
+	// UI panel.
 	if _, inCF := asset.CustomFields["order_number"]; inCF {
 		t.Errorf("order_number should not land in CustomFields")
 	}
 	if asset.OrderNumber != "1TESTORD" {
 		t.Errorf("asset.OrderNumber = %q, want %q", asset.OrderNumber, "1TESTORD")
 	}
-	if asset.PurchaseDate == nil || asset.PurchaseDate.IsZero() {
-		t.Fatalf("asset.PurchaseDate is nil/zero, want 2024-06-15")
-	}
-	if got := asset.PurchaseDate.Format("2006-01-02"); got != "2024-06-15" {
-		t.Errorf("asset.PurchaseDate = %s, want 2024-06-15", got)
+
+	// purchase_date is held in CustomFields as a workaround for upstream
+	// SnipeTime.MarshalJSON (see sync.go). Snipe-IT still routes the key
+	// to its native purchase_date column.
+	if got := asset.CustomFields["purchase_date"]; got != "2024-06-15" {
+		t.Errorf("CustomFields[purchase_date] = %q, want 2024-06-15", got)
 	}
 
 	// warranty_months auto-calculated

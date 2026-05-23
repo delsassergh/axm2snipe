@@ -821,6 +821,7 @@ func (e *Engine) updateAsset(ctx context.Context, logger *logrus.Entry, device a
 
 	e.applyFieldMapping(&desired, device, coverage)
 	applyWarrantyNotes(&desired, coverage)
+	stripOrderInfoOnUpdate(&desired, existing, e.cfg.Sync.PreserveOrderInfoOnUpdate)
 
 	// Unless force mode, compare desired values against current Snipe-IT values
 	// and only send fields that are missing or different.
@@ -883,9 +884,18 @@ func (e *Engine) diffAsset(desired *snipeit.Asset, existing *snipeit.Asset) *sni
 	}
 
 	// Compare native order info fields.
-	if desired.PurchaseDate != nil && !desired.PurchaseDate.IsZero() {
-		if existing.PurchaseDate == nil || !desired.PurchaseDate.Equal(existing.PurchaseDate.Time) {
-			diff.PurchaseDate = desired.PurchaseDate
+	// purchase_date is held in CustomFields as a workaround for upstream
+	// SnipeTime.MarshalJSON (see applyFieldMapping). Compare the desired
+	// date string against the existing asset's native PurchaseDate field
+	// returned by GET, since Snipe-IT echoes purchase_date natively, not
+	// in CustomFields.
+	if desiredDate, ok := desired.CustomFields["purchase_date"]; ok {
+		existingDate := ""
+		if existing.PurchaseDate != nil && !existing.PurchaseDate.IsZero() {
+			existingDate = existing.PurchaseDate.Format("2006-01-02")
+		}
+		if desiredDate != existingDate {
+			diff.CustomFields["purchase_date"] = desiredDate
 			hasChanges = true
 		}
 	}
@@ -908,6 +918,12 @@ func (e *Engine) diffAsset(desired *snipeit.Asset, existing *snipeit.Asset) *sni
 	// (htmlspecialchars) in its API transformer, and BOOLEAN fields are stored
 	// as "0"/"1" while we write "false"/"true". Normalize both before comparing.
 	for key, desiredVal := range desired.CustomFields {
+		// purchase_date is compared explicitly above against the native
+		// existing.PurchaseDate field, not against existing.CustomFields
+		// (which is always empty for this key on GET responses).
+		if key == "purchase_date" {
+			continue
+		}
 		currentVal := html.UnescapeString(existing.CustomFields[key])
 		if normalizeBoolStr(currentVal) != normalizeBoolStr(desiredVal) {
 			diff.CustomFields[key] = desiredVal
@@ -956,10 +972,22 @@ func (e *Engine) applyFieldMapping(asset *snipeit.Asset, device abmclient.Device
 		case "producttype", "product_type":
 			value = attrs.ProductType
 		case "ordernumber", "order_number":
+			// Skip Configurator-enrolled devices: ABM emits a synthetic
+			// "CE-YYYY-MM-DD-HH-MM-SS-XXX" enrollment ID, not the real
+			// order number. The sync.sync_configurator_order_info flag
+			// is an opt-in escape hatch.
+			if skipConfiguratorOrderInfo(e.cfg, attrs) {
+				break
+			}
 			if attrs.OrderNumber != "" {
 				value = cleanOrderNumber(attrs.OrderNumber)
 			}
 		case "orderdate", "order_date":
+			// Same reasoning as order_number above — ABM emits the
+			// Configurator enrollment date, not the actual purchase date.
+			if skipConfiguratorOrderInfo(e.cfg, attrs) {
+				break
+			}
 			if !attrs.OrderDateTime.IsZero() {
 				value = attrs.OrderDateTime.Format("2006-01-02")
 			}
@@ -1047,9 +1075,15 @@ func (e *Engine) applyFieldMapping(asset *snipeit.Asset, device abmclient.Device
 			case "order_number":
 				asset.OrderNumber = value
 			case "purchase_date":
-				if t, err := time.Parse("2006-01-02", value); err == nil {
-					asset.PurchaseDate = &snipeit.SnipeTime{Time: t}
-				}
+				// Snipe-IT's purchase_date validator requires YYYY-MM-DD, but
+				// upstream go-snipeit's SnipeTime.MarshalJSON unconditionally
+				// emits "YYYY-MM-DD HH:MM:SS" (datetime). Bypass by writing the
+				// date-only string to CustomFields: Asset.MarshalJSON flattens
+				// CustomFields to top-level keys *after* the native PurchaseDate
+				// line, so the plain string overrides the bad serialization.
+				// Snipe-IT routes the "purchase_date" key to its native column
+				// regardless. TODO: remove once upstream serializes date-only.
+				asset.CustomFields[snipeField] = value
 			default:
 				asset.CustomFields[snipeField] = value
 			}
@@ -1183,6 +1217,36 @@ func normalizeBoolStr(s string) string {
 
 // cleanOrderNumber extracts the middle segment from CDW-style order numbers
 // like "CDW/1CJ6QLW/002" → "1CJ6QLW". Other formats are returned as-is.
+// skipConfiguratorOrderInfo reports whether order_date / order_number should
+// be skipped for a device because ABM's values for it aren't real purchase
+// data. A device added to ABM via Apple Configurator
+// (purchaseSourceType=MANUALLY_ADDED) gets a synthetic order number like
+// "CE-2024-12-13-04-11-12-826" and an order date equal to the enrollment
+// time. Syncing those would overwrite better data already in Snipe-IT.
+// The sync.sync_configurator_order_info flag is an opt-in escape hatch.
+func skipConfiguratorOrderInfo(cfg *config.Config, attrs *abm.OrgDeviceAttributes) bool {
+	if cfg.Sync.SyncConfiguratorOrderInfo {
+		return false
+	}
+	return string(attrs.PurchaseSourceType) == "MANUALLY_ADDED"
+}
+
+// stripOrderInfoOnUpdate drops the order info from the desired asset when
+// the sync.preserve_order_info_on_update flag is on and the existing asset
+// already has values, so axm2snipe never overwrites order info on update.
+// First-time syncs (existing has no value) still go through.
+func stripOrderInfoOnUpdate(desired, existing *snipeit.Asset, preserve bool) {
+	if !preserve {
+		return
+	}
+	if existing.OrderNumber != "" {
+		desired.OrderNumber = ""
+	}
+	if existing.PurchaseDate != nil && !existing.PurchaseDate.IsZero() {
+		delete(desired.CustomFields, "purchase_date")
+	}
+}
+
 func cleanOrderNumber(order string) string {
 	parts := strings.Split(order, "/")
 	if len(parts) == 3 {
@@ -1328,9 +1392,6 @@ func formatAssetDiff(a *snipeit.Asset) map[string]any {
 	}
 	if a.OrderNumber != "" {
 		m["order_number"] = a.OrderNumber
-	}
-	if a.PurchaseDate != nil && !a.PurchaseDate.IsZero() {
-		m["purchase_date"] = a.PurchaseDate.Format("2006-01-02")
 	}
 	for k, v := range a.CustomFields {
 		m[k] = v

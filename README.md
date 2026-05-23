@@ -180,6 +180,8 @@ axm2snipe request https://mdmenrollment.apple.com/server/devices
 | `sync.model_images` | Fetch device images from appledb.dev for newly created models (default: false) |
 | `sync.supplier_mapping` | Map ABM/ASM purchase source IDs/types to Snipe-IT supplier IDs |
 | `sync.field_mapping` | Map Snipe-IT fields to ABM/AppleCare source values |
+| `sync.preserve_order_info_on_update` | Never overwrite existing `purchase_date` / `order_number` on update. First-time syncs still populate them. (default: false) |
+| `sync.sync_configurator_order_info` | Sync ABM's `order_date` / `order_number` for devices added via Apple Configurator (`purchaseSourceType=MANUALLY_ADDED`). Off by default because ABM emits a synthetic `CE-YYYY-MM-DD-...` enrollment ID, not the real purchase info. (default: false) |
 | `snipe_it.computer_category_id` | Category ID for Mac models (overrides `category_id` for Macs) |
 | `snipe_it.mobile_category_id` | Category ID for iPhone/iPad/Watch/Vision models |
 | `snipe_it.custom_fieldset_id` | Fieldset ID to attach to auto-created models |
