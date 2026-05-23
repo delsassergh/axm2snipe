@@ -218,7 +218,8 @@ All field mappings are configured in `settings.yaml` under `sync.field_mapping`.
 | `product_type` | Hardware model identifier (e.g. "Mac16,10") -- used first for model matching |
 | `order_number` | Order number (CDW-style orders auto-cleaned) |
 | `order_date` | Order date (formatted YYYY-MM-DD) |
-| `purchase_source` | Purchase source name |
+| `purchase_source` | Purchase source type (auto title-cased: `Apple`, `Reseller`, `Manually Added`) |
+| `purchase_source_id` | Apple Customer Number (for `Apple`) or Reseller Number (for `Reseller`) |
 | `status` | ABM device status |
 | `imei` | IMEI number(s) |
 | `meid` | MEID number(s) |
@@ -311,6 +312,11 @@ Alternatively, create them manually:
 | AppleCare Renewable | listbox | BOOLEAN | true, false |
 | AppleCare Payment Type | radio | ANY | Paid Up Front, Subscription, Abe Subscription, None |
 | Assigned MDM Server | text | ANY | -- |
+| EID | text | ANY | -- (cellular iPads) |
+| IMEI | text | ANY | -- (comma-separated if multiple) |
+| MEID | text | ANY | -- (comma-separated if multiple) |
+| Purchase Source | radio | ANY | Apple, Reseller, Manually Added |
+| Purchase Source ID | text | ANY | -- (Apple Customer Number or Reseller Number) |
 
 ## Slack Notifications
 

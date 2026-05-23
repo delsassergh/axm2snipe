@@ -86,8 +86,9 @@ sync:
   # ABM device attributes:
   #   serial_number, device_model, color, device_capacity, part_number,
   #   product_family, product_type, order_number, order_date,
-  #   purchase_source, status, imei, meid, wifi_mac, bluetooth_mac,
-  #   ethernet_mac, eid, added_to_org, released_from_org, assigned_server
+  #   purchase_source, purchase_source_id, status, imei, meid, wifi_mac,
+  #   bluetooth_mac, ethernet_mac, eid, added_to_org, released_from_org,
+  #   assigned_server
   #
   # AppleCare coverage (fetched per device):
   #   applecare_status, applecare_agreement, applecare_description,
@@ -107,6 +108,11 @@ sync:
   #   AppleCare Renewable  -> listbox, format: BOOLEAN, values: true/false
   #   AppleCare Payment    -> radio, values: Paid Up Front/Subscription/Abe Subscription/None
   #   Assigned MDM Server  -> text, format: ANY
+  #   EID                  -> text, format: ANY
+  #   IMEI                 -> text, format: ANY (comma-separated if multiple)
+  #   MEID                 -> text, format: ANY (comma-separated if multiple)
+  #   Purchase Source      -> radio, values: Apple/Reseller/Manually Added
+  #   Purchase Source ID   -> text, format: ANY
   #
   # field_mapping:
   #   _snipeit_wifi_mac_1: wifi_mac

@@ -331,6 +331,77 @@ func TestDiffAsset_SupplierDiff(t *testing.T) {
 	}
 }
 
+func TestDiffAsset_PurchaseDateDiff(t *testing.T) {
+	e := &Engine{cfg: &config.Config{}}
+	desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
+	desired.PurchaseDate = &snipeit.SnipeTime{Time: time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)}
+
+	existing := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
+	existing.PurchaseDate = &snipeit.SnipeTime{Time: time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC)}
+
+	diff := e.diffAsset(desired, existing)
+	if diff == nil {
+		t.Fatal("diffAsset should detect purchase_date change")
+	}
+	if diff.PurchaseDate == nil || diff.PurchaseDate.Format("2006-01-02") != "2024-06-15" {
+		t.Errorf("diff.PurchaseDate = %v, want 2024-06-15", diff.PurchaseDate)
+	}
+}
+
+func TestDiffAsset_PurchaseDateUnchanged(t *testing.T) {
+	e := &Engine{cfg: &config.Config{}}
+	date := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
+	desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
+	desired.PurchaseDate = &snipeit.SnipeTime{Time: date}
+
+	existing := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
+	existing.PurchaseDate = &snipeit.SnipeTime{Time: date}
+
+	if diff := e.diffAsset(desired, existing); diff != nil {
+		t.Errorf("diffAsset should return nil when purchase_date matches, got %+v", diff)
+	}
+}
+
+func TestDiffAsset_OrderNumberDiff(t *testing.T) {
+	e := &Engine{cfg: &config.Config{}}
+	desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
+	desired.OrderNumber = "NEW123"
+
+	existing := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
+	existing.OrderNumber = "OLD456"
+
+	diff := e.diffAsset(desired, existing)
+	if diff == nil {
+		t.Fatal("diffAsset should detect order_number change")
+	}
+	if diff.OrderNumber != "NEW123" {
+		t.Errorf("diff.OrderNumber = %q, want NEW123", diff.OrderNumber)
+	}
+}
+
+func TestApplyFieldMapping_PurchaseSourceID(t *testing.T) {
+	e := &Engine{cfg: &config.Config{
+		Sync: config.SyncConfig{
+			FieldMapping: map[string]string{
+				"_snipeit_src_id_1": "purchase_source_id",
+			},
+		},
+	}}
+	device := abmclient.Device{
+		OrgDevice: abm.OrgDevice{
+			Attributes: &abm.OrgDeviceAttributes{
+				PurchaseSourceID: "ABC123",
+			},
+		},
+	}
+	asset := snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)}}
+	e.applyFieldMapping(&asset, device, nil)
+
+	if got := asset.CustomFields["_snipeit_src_id_1"]; got != "ABC123" {
+		t.Errorf("purchase_source_id = %q, want ABC123", got)
+	}
+}
+
 func TestDiffAsset_WarrantyMonthsDiff(t *testing.T) {
 	e := &Engine{cfg: &config.Config{}}
 	desired := &snipeit.Asset{
@@ -433,13 +504,11 @@ func TestApplyFieldMapping(t *testing.T) {
 		"_snipeit_renew_8":   "true",
 		"_snipeit_server_9":  "TestMDM",
 		"_snipeit_added_10":  "2024-07-01",
-		"order_number":       "1TESTORD",
-		"purchase_date":      "2024-06-15",
 		"_snipeit_model_11":  "MacBook Pro (16-inch, 2024)",
 		"_snipeit_part_12":   "TEST1LL/A",
 		"_snipeit_family_13": "Mac",
 		"_snipeit_type_14":   "Mac16,1",
-		"_snipeit_src_15":    "RESELLER",
+		"_snipeit_src_15":    "Reseller",
 		"_snipeit_stat_16":   "true",
 	}
 
@@ -448,6 +517,24 @@ func TestApplyFieldMapping(t *testing.T) {
 		if got != want {
 			t.Errorf("field %q = %q, want %q", field, got, want)
 		}
+	}
+
+	// Native Snipe-IT fields: purchase_date and order_number must be routed
+	// to the top-level Asset struct fields, not into CustomFields.
+	if _, inCF := asset.CustomFields["purchase_date"]; inCF {
+		t.Errorf("purchase_date should not land in CustomFields")
+	}
+	if _, inCF := asset.CustomFields["order_number"]; inCF {
+		t.Errorf("order_number should not land in CustomFields")
+	}
+	if asset.OrderNumber != "1TESTORD" {
+		t.Errorf("asset.OrderNumber = %q, want %q", asset.OrderNumber, "1TESTORD")
+	}
+	if asset.PurchaseDate == nil || asset.PurchaseDate.IsZero() {
+		t.Fatalf("asset.PurchaseDate is nil/zero, want 2024-06-15")
+	}
+	if got := asset.PurchaseDate.Format("2006-01-02"); got != "2024-06-15" {
+		t.Errorf("asset.PurchaseDate = %s, want 2024-06-15", got)
 	}
 
 	// warranty_months auto-calculated

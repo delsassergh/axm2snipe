@@ -93,8 +93,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		{Name: "AXM: AppleCare Status", Element: "radio", Format: "ANY", HelpText: "AppleCare coverage status", FieldValues: "Active\nInactive\nExpired"},
 		mdmServerField,
 		{Name: "AXM: Bluetooth MAC Address", Element: "text", Format: "MAC", HelpText: "Bluetooth MAC address (colon-separated)"},
+		{Name: "AXM: EID", Element: "text", Format: "ANY", HelpText: "eSIM Embedded Identity Document (cellular iPads only)"},
 		{Name: "AXM: Ethernet MAC Address", Element: "text", Format: "ANY", HelpText: "Ethernet MAC address(es) (colon-separated, comma-separated if multiple)"},
+		{Name: "AXM: IMEI", Element: "text", Format: "ANY", HelpText: "International Mobile Equipment Identity (cellular devices, comma-separated if multiple)"},
+		{Name: "AXM: MEID", Element: "text", Format: "ANY", HelpText: "Mobile Equipment Identifier (CDMA devices, comma-separated if multiple)"},
 		{Name: "AXM: Part Number", Element: "text", Format: "ANY", HelpText: "Apple part number (e.g. MW0Y3LL/A)"},
+		{Name: "AXM: Purchase Source", Element: "radio", Format: "ANY", HelpText: "How the device was acquired in ABM/ASM", FieldValues: "Apple\nReseller\nManually Added"},
+		{Name: "AXM: Purchase Source ID", Element: "text", Format: "ANY", HelpText: "Apple Customer Number (for APPLE) or Reseller Number (for RESELLER)"},
 		{Name: "AXM: Released from Org", Element: "text", Format: "DATE", HelpText: "Date device was released from ABM/ASM organization"},
 		{Name: "AXM: Wi-Fi MAC Address", Element: "text", Format: "MAC", HelpText: "Wi-Fi MAC address (colon-separated)"},
 	}
@@ -117,8 +122,13 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		"AXM: AppleCare Payment Type": "applecare_payment_type",
 		"AXM: Assigned MDM Server":    "assigned_server",
 		"AXM: Bluetooth MAC Address":  "bluetooth_mac",
+		"AXM: EID":                    "eid",
 		"AXM: Ethernet MAC Address":   "ethernet_mac",
+		"AXM: IMEI":                   "imei",
+		"AXM: MEID":                   "meid",
 		"AXM: Part Number":            "part_number",
+		"AXM: Purchase Source":        "purchase_source",
+		"AXM: Purchase Source ID":     "purchase_source_id",
 		"AXM: Wi-Fi MAC Address":      "wifi_mac",
 	}
 
@@ -134,6 +144,14 @@ func runSetup(cmd *cobra.Command, args []string) error {
 			replaceValues[attr] = true
 		}
 	}
+
+	// Native Snipe-IT order info: route ABM's orderDateTime/orderNumber to the
+	// built-in purchase_date and order_number fields so they land in Snipe-IT's
+	// "Order Information" UI panel instead of as custom fields.
+	fieldMapping["purchase_date"] = "order_date"
+	fieldMapping["order_number"] = "order_number"
+	replaceValues["order_date"] = true
+	replaceValues["order_number"] = true
 
 	// Save to config file, replacing any stale mappings for attributes we manage
 	if err := config.MergeFieldMapping(ConfigFile, fieldMapping, replaceValues); err != nil {

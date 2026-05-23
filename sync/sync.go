@@ -882,6 +882,18 @@ func (e *Engine) diffAsset(desired *snipeit.Asset, existing *snipeit.Asset) *sni
 		hasChanges = true
 	}
 
+	// Compare native order info fields.
+	if desired.PurchaseDate != nil && !desired.PurchaseDate.IsZero() {
+		if existing.PurchaseDate == nil || !desired.PurchaseDate.Equal(existing.PurchaseDate.Time) {
+			diff.PurchaseDate = desired.PurchaseDate
+			hasChanges = true
+		}
+	}
+	if desired.OrderNumber != "" && desired.OrderNumber != existing.OrderNumber {
+		diff.OrderNumber = desired.OrderNumber
+		hasChanges = true
+	}
+
 	// Compare full notes string; desired.Notes already contains the existing
 	// content with only the sentinel block replaced, so a difference here means
 	// the warranty block changed.
@@ -913,8 +925,10 @@ func (e *Engine) diffAsset(desired *snipeit.Asset, existing *snipeit.Asset) *sni
 // All field mappings — ABM device attributes, AppleCare coverage, and standard
 // Snipe-IT fields like purchase_date — are driven entirely by settings.yaml.
 // Custom field keys (starting with _snipeit_) go into Asset.CustomFields;
-// all other mapped values also go into CustomFields since Snipe-IT treats
-// them as top-level keys on write.
+// recognized native Snipe-IT field names (asset_tag, order_number, purchase_date)
+// are routed to their corresponding Asset struct fields so they land in
+// Snipe-IT's built-in UI (Order Information, etc.) instead of as custom fields.
+// All other mapped keys go into CustomFields.
 func (e *Engine) applyFieldMapping(asset *snipeit.Asset, device abmclient.Device, coverage *abmclient.CoverageResult) {
 	var ac *abmclient.AppleCareCoverage
 	if coverage != nil {
@@ -950,7 +964,9 @@ func (e *Engine) applyFieldMapping(asset *snipeit.Asset, device abmclient.Device
 				value = attrs.OrderDateTime.Format("2006-01-02")
 			}
 		case "purchasesource", "purchase_source":
-			value = string(attrs.PurchaseSourceType)
+			value = titleCase(string(attrs.PurchaseSourceType))
+		case "purchasesourceid", "purchase_source_id":
+			value = attrs.PurchaseSourceID
 		case "status":
 			if strings.EqualFold(string(attrs.Status), "ASSIGNED") {
 				value = "true"
@@ -1022,10 +1038,18 @@ func (e *Engine) applyFieldMapping(asset *snipeit.Asset, device abmclient.Device
 		}
 		if value != "" {
 			// Route top-level Snipe-IT fields to their proper struct fields
-			// rather than CustomFields, so MarshalJSON does not overwrite them.
+			// rather than CustomFields, so MarshalJSON does not overwrite them
+			// and so they land in Snipe-IT's native UI (Order Information, etc.)
+			// instead of as custom fields.
 			switch snipeField {
 			case "asset_tag":
 				asset.AssetTag = value
+			case "order_number":
+				asset.OrderNumber = value
+			case "purchase_date":
+				if t, err := time.Parse("2006-01-02", value); err == nil {
+					asset.PurchaseDate = &snipeit.SnipeTime{Time: t}
+				}
 			default:
 				asset.CustomFields[snipeField] = value
 			}
@@ -1301,6 +1325,12 @@ func formatAssetDiff(a *snipeit.Asset) map[string]any {
 	}
 	if a.Notes != "" {
 		m["notes"] = a.Notes
+	}
+	if a.OrderNumber != "" {
+		m["order_number"] = a.OrderNumber
+	}
+	if a.PurchaseDate != nil && !a.PurchaseDate.IsZero() {
+		m["purchase_date"] = a.PurchaseDate.Format("2006-01-02")
 	}
 	for k, v := range a.CustomFields {
 		m[k] = v
