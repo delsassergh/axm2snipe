@@ -45,7 +45,7 @@ go build -o axm2snipe .
 - **Model images from appledb.dev**: When `sync.model_images: true`, `ensureModel()` calls `fetchModelImage(ctx, productType)` using the hardware identifier (e.g. "Mac16,10") to fetch a PNG from appledb.dev and attach it as a base64 data URI. Failures are silently skipped. Only applies to newly created models.
 - **Serial is always the asset tag**: `createAsset()` forces `asset_tag = serial` after `applyFieldMapping()`, so a `field_mapping` entry of `asset_tag: imei` cannot override it.
 - **Exact serial matching**: `GetAssetBySerial` post-filters Snipe-IT's `/byserial` results (which do substring matching) to exact case-insensitive matches, preventing wrong assets from being updated.
-- **Invalid field retry**: `PatchAsset` retries without rejected custom fields when Snipe-IT returns "not available on this Asset Model's fieldset" or "is invalid." errors, logging the rejected fields and reason.
+- **Invalid field retry**: `PatchAsset` retries once when Snipe-IT rejects custom fields, with per-field remediation. Fields rejected with "not available on this Asset Model's fieldset" are **stripped** from the retry payload. Fields rejected with "is invalid." (value not in the allowed options) are sent with an **empty value** on retry to clear the stored bad value — Snipe-IT re-validates stored custom-field values on every PATCH against the current field definition, so stripping alone would leave the stored bad value intact and the next PATCH would fail with the same error.
 
 ## Testing
 

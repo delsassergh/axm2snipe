@@ -9,8 +9,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/sirupsen/logrus"
 	snipeit "github.com/michellepellon/go-snipeit"
+	"github.com/sirupsen/logrus"
 )
 
 var log = logrus.New()
@@ -180,9 +180,14 @@ func (c *Client) CreateAsset(ctx context.Context, asset snipeit.Asset) (*snipeit
 }
 
 // PatchAsset partially updates an existing hardware asset by ID.
-// If Snipe-IT rejects custom fields because they are not in the asset model's
-// fieldset, those fields are stripped and the update is retried once so that
-// the non-custom-field data (name, serial, warranty, etc.) still gets applied.
+// When Snipe-IT rejects custom fields, the update is retried once with
+// per-field remediation:
+//   - Fields not in the model's fieldset are stripped from the request.
+//   - Fields with values rejected as "is invalid" are sent with an empty
+//     value to clear the stored bad value, because Snipe-IT re-validates
+//     stored custom field values on every PATCH against the current field
+//     definition — simply stripping leaves the stored value intact and the
+//     next PATCH would fail with the same error.
 func (c *Client) PatchAsset(ctx context.Context, id int, asset snipeit.Asset) (*snipeit.Asset, error) {
 	if c.DryRun {
 		return nil, ErrDryRun
@@ -192,24 +197,26 @@ func (c *Client) PatchAsset(ctx context.Context, id int, asset snipeit.Asset) (*
 		return nil, fmt.Errorf("updating asset %d: %w", id, err)
 	}
 	if resp.Status != "success" {
-		// Parse field-level validation errors and retry without the rejected fields.
-		rejected, reason := invalidFieldErrors(string(resp.Message))
-		if len(rejected) > 0 && asset.CustomFields != nil {
+		toStrip, toClear := invalidFieldErrors(string(resp.Message))
+		if (len(toStrip) > 0 || len(toClear) > 0) && asset.CustomFields != nil {
 			log.WithFields(logrus.Fields{
 				"asset_id":    id,
 				"model_id":    asset.Model.ID,
 				"model_name":  asset.Model.Name,
 				"fieldset_id": asset.Model.FieldsetID,
-				"fields":      rejected,
-				"reason":      reason,
-			}).Warn("Snipe-IT rejected custom fields — retrying update without them. Run 'axm2snipe setup' to fix field configuration.")
+				"strip":       toStrip,
+				"clear":       toClear,
+			}).Warn("Snipe-IT rejected custom fields — retrying with stripped/cleared fields. Run 'axm2snipe setup' to fix field configuration.")
 			// Copy CustomFields to avoid mutating the caller's map.
 			fieldsCopy := make(map[string]string, len(asset.CustomFields))
 			for k, v := range asset.CustomFields {
 				fieldsCopy[k] = v
 			}
-			for _, key := range rejected {
+			for _, key := range toStrip {
 				delete(fieldsCopy, key)
+			}
+			for _, key := range toClear {
+				fieldsCopy[key] = ""
 			}
 			asset.CustomFields = fieldsCopy
 			resp, _, err = c.Assets.PatchContext(ctx, id, asset)
@@ -226,35 +233,34 @@ func (c *Client) PatchAsset(ctx context.Context, id int, asset snipeit.Asset) (*
 	return &resp.Payload, nil
 }
 
-// invalidFieldErrors parses a Snipe-IT validation error message and returns
-// the custom field keys that should be stripped on retry, along with a short
-// reason string describing why. Two error patterns are handled:
-//   - "not available on this Asset Model's fieldset" — field not in the model's fieldset
-//   - "is invalid." — field value not in the field's allowed options list
-func invalidFieldErrors(msg string) ([]string, string) {
+// invalidFieldErrors parses a Snipe-IT validation error message and classifies
+// rejected custom field keys by the remediation the caller should apply on
+// retry:
+//   - toStrip: "not available on this Asset Model's fieldset" — the field
+//     does not belong on this asset; remove it from the request.
+//   - toClear: "is invalid." — the value is not in the field's allowed
+//     options; send the field with an empty value to clear the stored bad
+//     value (Snipe-IT re-validates stored values on every PATCH).
+func invalidFieldErrors(msg string) (toStrip, toClear []string) {
 	// Message is a JSON object: {"_snipeit_foo_1": ["..."]}
 	var errs map[string][]string
 	if err := json.Unmarshal([]byte(msg), &errs); err != nil {
-		return nil, ""
+		return nil, nil
 	}
-	var rejected []string
-	reason := ""
 fieldLoop:
 	for key, msgs := range errs {
 		for _, m := range msgs {
 			switch {
 			case strings.Contains(m, "not available on this Asset Model's fieldset"):
-				rejected = append(rejected, key)
-				reason = "fieldset missing"
+				toStrip = append(toStrip, key)
 				continue fieldLoop
 			case strings.Contains(m, "is invalid."):
-				rejected = append(rejected, key)
-				reason = "invalid field value"
+				toClear = append(toClear, key)
 				continue fieldLoop
 			}
 		}
 	}
-	return rejected, reason
+	return toStrip, toClear
 }
 
 // --- Custom fields setup ---
