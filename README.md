@@ -83,6 +83,11 @@ Copy the example config and fill in your values:
 cp settings.example.yaml settings.yaml
 ```
 
+If your installation method did not download a settings.example.yaml, download it:
+```bash
+curl -L https://raw.githubusercontent.com/CampusTech/axm2snipe/refs/heads/main/settings.example.yaml -o settings.yaml
+```
+
 See [settings.example.yaml](settings.example.yaml) for all options and documentation.
 
 ## Usage
