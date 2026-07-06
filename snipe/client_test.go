@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -113,6 +114,64 @@ func TestGetAssetBySerial(t *testing.T) {
 	}
 }
 
+// TestGetAssetBySerial_RetriesOn429 is a regression test for the sync run
+// where GetAssetBySerial started failing outright on Snipe-IT rate limits.
+// That happened because NewClient sets DisableRetries at the client level
+// (to stop non-idempotent writes from being retried after a network error --
+// see NewClient), which also silently disabled the upstream library's
+// automatic retry-on-429 for this safe, idempotent GET. GetAssetBySerial
+// must retry 429s itself instead of surfacing them as a failed lookup.
+func TestGetAssetBySerial_RetriesOn429(t *testing.T) {
+	var requestCount int
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		resp := map[string]any{
+			"total": 1,
+			"rows": []map[string]any{
+				{"id": 1, "name": "Test Asset", "serial": "RATELIMITED1"},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	c := newTestClient(t, handler)
+	resp, err := c.GetAssetBySerial(context.Background(), "RATELIMITED1")
+	if err != nil {
+		t.Fatalf("GetAssetBySerial: %v", err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("expected 2 requests (1 rate-limited + 1 retry), got %d", requestCount)
+	}
+	if resp.Total != 1 || len(resp.Rows) != 1 || resp.Rows[0].ID != 1 {
+		t.Errorf("unexpected response after retry: %+v", resp)
+	}
+}
+
+// TestGetAssetBySerial_NonRateLimitErrorNotRetried verifies that only 429
+// responses trigger a retry -- a plain 404/500 fails immediately, matching
+// the upstream library's non-retry behavior for anything else.
+func TestGetAssetBySerial_NonRateLimitErrorNotRetried(t *testing.T) {
+	var requestCount int
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		http.Error(w, "server error", http.StatusInternalServerError)
+	})
+
+	c := newTestClient(t, handler)
+	_, err := c.GetAssetBySerial(context.Background(), "SERIAL1")
+	if err == nil {
+		t.Fatal("expected an error for a 500 response")
+	}
+	if requestCount != 1 {
+		t.Errorf("expected exactly 1 request (no retry for non-429 errors), got %d", requestCount)
+	}
+}
+
 func TestCreateAsset_Success(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -187,6 +246,145 @@ func TestListAllModels_Pagination(t *testing.T) {
 	}
 	if callCount != 2 {
 		t.Errorf("expected 2 API calls for pagination, got %d", callCount)
+	}
+}
+
+func TestListAllAssets_Pagination(t *testing.T) {
+	callCount := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount++
+		var resp map[string]any
+		if callCount == 1 {
+			resp = map[string]any{
+				"total": 3,
+				"rows": []map[string]any{
+					{"id": 1, "name": "Asset 1", "serial": "SERIAL1"},
+					{"id": 2, "name": "Asset 2", "serial": "SERIAL2"},
+				},
+			}
+		} else {
+			resp = map[string]any{
+				"total": 3,
+				"rows": []map[string]any{
+					{"id": 3, "name": "Asset 3", "serial": "SERIAL3"},
+				},
+			}
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	c := newTestClient(t, handler)
+	assets, err := c.ListAllAssets(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(assets) != 3 {
+		t.Errorf("expected 3 assets, got %d", len(assets))
+	}
+	if callCount != 2 {
+		t.Errorf("expected 2 API calls for pagination, got %d", callCount)
+	}
+}
+
+// TestPatchAsset_RetriesOn429 verifies that createOrUpdateAsset (used by
+// both CreateAsset and PatchAsset) retries on a 429 the same way
+// GetAssetBySerial does. This is safe even though it's a write: a 429 means
+// Snipe-IT's rate limiter rejected the request before it reached the
+// create/update logic, so nothing was written -- unlike a generic network
+// error, where the original request might already have been processed (the
+// scenario DisableRetries protects against; see NewClient).
+func TestPatchAsset_RetriesOn429(t *testing.T) {
+	var requestCount int
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if requestCount == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return
+		}
+		resp := map[string]any{
+			"status":   "success",
+			"messages": "Asset updated",
+			"payload":  map[string]any{"id": 7},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+
+	c := newTestClient(t, handler)
+	asset, err := c.PatchAsset(context.Background(), 7, snipeit.Asset{})
+	if err != nil {
+		t.Fatalf("PatchAsset: %v", err)
+	}
+	if requestCount != 2 {
+		t.Fatalf("expected 2 requests (1 rate-limited + 1 retry), got %d", requestCount)
+	}
+	if asset.ID != 7 {
+		t.Errorf("asset.ID = %d, want 7", asset.ID)
+	}
+}
+
+// TestPatchAsset_StringFieldsetID is a regression test for Snipe-IT returning
+// the PATCH response's embedded payload.model.fieldset_id as a JSON string
+// instead of a number. The upstream go-snipeit library declares
+// Model.FieldsetID as a plain int, so decoding straight into its
+// AssetCreateResponse type (as Assets.PatchContext does) fails with "cannot
+// unmarshal string into Go struct field ...fieldset_id of type int" even
+// though Snipe-IT applied the update successfully. PatchAsset must not use
+// that decode path.
+func TestPatchAsset_StringFieldsetID(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch {
+			http.Error(w, "expected PATCH", http.StatusMethodNotAllowed)
+			return
+		}
+		// Raw JSON so fieldset_id is a quoted string, matching what Dan's
+		// Snipe-IT instance actually returned.
+		fmt.Fprint(w, `{
+			"status": "success",
+			"messages": "Asset updated",
+			"payload": {
+				"id": 5,
+				"model": {"id": 12, "name": "MacBook Pro", "fieldset_id": "1"}
+			}
+		}`)
+	})
+
+	c := newTestClient(t, handler)
+	asset, err := c.PatchAsset(context.Background(), 5, snipeit.Asset{})
+	if err != nil {
+		t.Fatalf("PatchAsset: %v", err)
+	}
+	if asset.ID != 5 {
+		t.Errorf("asset.ID = %d, want 5", asset.ID)
+	}
+}
+
+// TestCreateAsset_StringFieldsetID is the create-path counterpart of
+// TestPatchAsset_StringFieldsetID -- CreateAsset goes through the same
+// lenient decode and must not choke on a string fieldset_id either.
+func TestCreateAsset_StringFieldsetID(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "expected POST", http.StatusMethodNotAllowed)
+			return
+		}
+		fmt.Fprint(w, `{
+			"status": "success",
+			"messages": "Asset created",
+			"payload": {
+				"id": 101,
+				"model": {"id": 12, "name": "MacBook Pro", "fieldset_id": "1"}
+			}
+		}`)
+	})
+
+	c := newTestClient(t, handler)
+	asset, err := c.CreateAsset(context.Background(), snipeit.Asset{})
+	if err != nil {
+		t.Fatalf("CreateAsset: %v", err)
+	}
+	if asset.ID != 101 {
+		t.Errorf("asset.ID = %d, want 101", asset.ID)
 	}
 }
 

@@ -3,6 +3,8 @@ package sync
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/CampusTech/axm2snipe/abmclient"
 	"github.com/CampusTech/axm2snipe/config"
+	"github.com/CampusTech/axm2snipe/snipe"
 )
 
 // --- Pure function tests ---
@@ -423,7 +426,7 @@ func TestApplyFieldMapping_SkipsOrderForManuallyAdded(t *testing.T) {
 				},
 			}
 			asset := snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)}}
-			e.applyFieldMapping(&asset, device, nil)
+			e.applyFieldMapping(context.Background(), &asset, device, nil)
 
 			if asset.OrderNumber != tt.wantOrderNumber {
 				t.Errorf("OrderNumber = %q, want %q", asset.OrderNumber, tt.wantOrderNumber)
@@ -523,7 +526,7 @@ func TestApplyFieldMapping_PurchaseDateWireFormat(t *testing.T) {
 		},
 	}
 	asset := snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)}}
-	e.applyFieldMapping(&asset, device, nil)
+	e.applyFieldMapping(context.Background(), &asset, device, nil)
 
 	body, err := json.Marshal(asset)
 	if err != nil {
@@ -558,7 +561,7 @@ func TestApplyFieldMapping_PurchaseSourceID(t *testing.T) {
 		},
 	}
 	asset := snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)}}
-	e.applyFieldMapping(&asset, device, nil)
+	e.applyFieldMapping(context.Background(), &asset, device, nil)
 
 	if got := asset.CustomFields["_snipeit_src_id_1"]; got != "ABC123" {
 		t.Errorf("purchase_source_id = %q, want ABC123", got)
@@ -654,7 +657,7 @@ func TestApplyFieldMapping(t *testing.T) {
 	asset := snipeit.Asset{
 		CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)},
 	}
-	e.applyFieldMapping(&asset, device, coverage)
+	e.applyFieldMapping(context.Background(), &asset, device, coverage)
 
 	checks := map[string]string{
 		"_snipeit_color_1":   "Space Gray",
@@ -706,6 +709,89 @@ func TestApplyFieldMapping(t *testing.T) {
 	}
 }
 
+func TestApplyFieldMapping_AppleDBFields(t *testing.T) {
+	e := &Engine{
+		cfg: &config.Config{
+			Sync: config.SyncConfig{
+				FieldMapping: map[string]string{
+					"_snipeit_apple_model_1": "apple_model_number",
+					"_snipeit_chip_2":        "chip",
+					"_snipeit_year_3":        "model_year",
+				},
+			},
+		},
+		// Pre-populate the cache so the test never makes a real network call
+		// to appledb.dev; this also exercises appleDBInfoFor's cache-hit path.
+		appleDBCache: map[string]*appleDBDeviceInfo{
+			"Mac16,10": {
+				RegulatoryModel: "A3238",
+				Chip:            "M4",
+				ReleaseYear:     "2024",
+			},
+		},
+	}
+
+	device := abmclient.Device{
+		OrgDevice: abm.OrgDevice{
+			Attributes: &abm.OrgDeviceAttributes{
+				ProductType: "Mac16,10",
+			},
+		},
+	}
+
+	asset := snipeit.Asset{
+		CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)},
+	}
+	e.applyFieldMapping(context.Background(), &asset, device, nil)
+
+	checks := map[string]string{
+		"_snipeit_apple_model_1": "A3238",
+		"_snipeit_chip_2":        "M4",
+		"_snipeit_year_3":        "2024",
+	}
+	for field, want := range checks {
+		if got := asset.CustomFields[field]; got != want {
+			t.Errorf("field %q = %q, want %q", field, got, want)
+		}
+	}
+
+	// The cache should still contain exactly the one entry we seeded --
+	// appleDBInfoFor must not have made a real lookup for a cache hit.
+	if len(e.appleDBCache) != 1 {
+		t.Errorf("appleDBCache has %d entries, want 1 (no new lookups expected)", len(e.appleDBCache))
+	}
+}
+
+func TestApplyFieldMapping_AppleDBFields_UnknownProductType(t *testing.T) {
+	e := &Engine{cfg: &config.Config{
+		Sync: config.SyncConfig{
+			FieldMapping: map[string]string{
+				"_snipeit_apple_model_1": "apple_model_number",
+			},
+		},
+	}}
+
+	// No ProductType set -- appleDBInfoFor should short-circuit on the empty
+	// string and never attempt a network call.
+	device := abmclient.Device{
+		OrgDevice: abm.OrgDevice{
+			Attributes: &abm.OrgDeviceAttributes{},
+		},
+	}
+
+	asset := snipeit.Asset{
+		CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)},
+	}
+	e.applyFieldMapping(context.Background(), &asset, device, nil)
+
+	if v, ok := asset.CustomFields["_snipeit_apple_model_1"]; ok {
+		t.Errorf("apple_model_number should be empty with no ProductType, got %q", v)
+	}
+	if e.appleDBCache != nil {
+		t.Errorf("appleDBCache should remain nil when ProductType is empty, got %v", e.appleDBCache)
+	}
+}
+
 func TestApplyFieldMapping_NoAppleCare(t *testing.T) {
 	e := &Engine{cfg: &config.Config{
 		Sync: config.SyncConfig{
@@ -727,7 +813,7 @@ func TestApplyFieldMapping_NoAppleCare(t *testing.T) {
 	asset := snipeit.Asset{
 		CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)},
 	}
-	e.applyFieldMapping(&asset, device, nil)
+	e.applyFieldMapping(context.Background(), &asset, device, nil)
 
 	if v, ok := asset.CustomFields["_snipeit_status_1"]; ok {
 		t.Errorf("applecare_status should be empty with nil AC, got %q", v)
@@ -757,7 +843,7 @@ func TestApplyFieldMapping_StatusUnassigned(t *testing.T) {
 	asset := snipeit.Asset{
 		CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)},
 	}
-	e.applyFieldMapping(&asset, device, nil)
+	e.applyFieldMapping(context.Background(), &asset, device, nil)
 
 	if asset.CustomFields["_snipeit_mdm_1"] != "false" {
 		t.Errorf("status UNASSIGNED should map to 'false', got %q", asset.CustomFields["_snipeit_mdm_1"])
@@ -784,7 +870,7 @@ func TestApplyFieldMapping_EthernetMAC(t *testing.T) {
 	asset := snipeit.Asset{
 		CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)},
 	}
-	e.applyFieldMapping(&asset, device, nil)
+	e.applyFieldMapping(context.Background(), &asset, device, nil)
 
 	if asset.CustomFields["_snipeit_eth_1"] != "11:22:33:44:55:66" {
 		t.Errorf("ethernet_mac = %q, want 11:22:33:44:55:66", asset.CustomFields["_snipeit_eth_1"])
@@ -1047,6 +1133,72 @@ func TestProcessDevice_NotAvailableSerial(t *testing.T) {
 	}
 	if e.stats.Skipped != 1 {
 		t.Errorf("'Not Available' serial should skip, got skipped=%d", e.stats.Skipped)
+	}
+}
+
+// --- lookupExistingAsset tests ---
+//
+// loadAssets/lookupExistingAsset replace the old one-GetAssetBySerial-call-
+// per-device pattern with a single paginated preload, since Snipe-IT's API
+// throttle (60-120 req/min) made thousands of individual lookups on a full
+// sync run a much bigger rate-limit risk than a handful of list calls.
+
+func TestLookupExistingAsset_UsesPreloadedIndex(t *testing.T) {
+	e := &Engine{
+		assetsBySerial: map[string][]snipeit.Asset{
+			"testserial1": {{CommonFields: snipeit.CommonFields{ID: 42}, Serial: "TESTSERIAL1"}},
+		},
+	}
+	// e.snipe is deliberately left nil: if lookupExistingAsset fell through
+	// to the live API path instead of using the preloaded index, this would
+	// panic rather than succeed.
+	resp, err := e.lookupExistingAsset(context.Background(), "TestSerial1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 1 || len(resp.Rows) != 1 || resp.Rows[0].ID != 42 {
+		t.Errorf("unexpected result: %+v", resp)
+	}
+}
+
+func TestLookupExistingAsset_UnknownSerialReturnsEmpty(t *testing.T) {
+	e := &Engine{assetsBySerial: map[string][]snipeit.Asset{}}
+	resp, err := e.lookupExistingAsset(context.Background(), "NOPE")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 0 || len(resp.Rows) != 0 {
+		t.Errorf("expected empty result for unknown serial, got %+v", resp)
+	}
+}
+
+func TestLookupExistingAsset_FallsBackWhenNotPreloaded(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]any{
+			"total": 1,
+			"rows": []map[string]any{
+				{"id": 99, "name": "Fallback Asset", "serial": "FALLBACK1"},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	snipeClient, err := snipe.NewClient(srv.URL, "test-key", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// assetsBySerial deliberately left nil, simulating RunSingle, which
+	// never calls loadAssets.
+	e := &Engine{snipe: snipeClient}
+	resp, err := e.lookupExistingAsset(context.Background(), "FALLBACK1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Total != 1 || len(resp.Rows) != 1 || resp.Rows[0].ID != 99 {
+		t.Errorf("unexpected fallback result: %+v", resp)
 	}
 }
 

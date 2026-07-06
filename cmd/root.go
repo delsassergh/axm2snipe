@@ -166,6 +166,12 @@ func applyStringFlag(cmd *cobra.Command, name string, dst *string) {
 	}
 }
 
+func applyIntFlag(cmd *cobra.Command, name string, dst *int) {
+	if cmd.Flags().Changed(name) {
+		*dst, _ = cmd.Flags().GetInt(name)
+	}
+}
+
 // contextWithSignal returns a context that is canceled on SIGINT/SIGTERM.
 func contextWithSignal() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -233,9 +239,10 @@ func Execute() {
 	testCmd := NewTestCmd()
 	accessTokenCmd := NewAccessTokenCmd()
 	requestCmd := NewRequestCmd()
+	backfillImagesCmd := NewBackfillImagesCmd()
 
-	// --dry-run: sync, setup
-	for _, cmd := range []*cobra.Command{syncCmd, setupCmd} {
+	// --dry-run: sync, setup, backfill-images
+	for _, cmd := range []*cobra.Command{syncCmd, setupCmd, backfillImagesCmd} {
 		cmd.Flags().Bool("dry-run", false, "Simulate without making changes")
 	}
 
@@ -250,6 +257,7 @@ func Execute() {
 	rootCmd.AddCommand(testCmd)
 	rootCmd.AddCommand(accessTokenCmd)
 	rootCmd.AddCommand(requestCmd)
+	rootCmd.AddCommand(backfillImagesCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

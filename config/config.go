@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -36,6 +37,41 @@ type ABMConfig struct {
 	ClientID   string `yaml:"client_id"`
 	KeyID      string `yaml:"key_id"`
 	PrivateKey string `yaml:"private_key"` // path to PEM file or raw PEM string
+
+	// PageDelaySeconds paces the paginated orgDevices fetch used by
+	// `download`/`sync` (see abmclient.FetchDevicesPaged): axm2snipe waits this
+	// long between each page request instead of relying solely on the upstream
+	// abm library's fixed internal rate limiter. Defaults to 5 seconds if unset
+	// or zero. Increase this if you see 429 RATE_LIMIT_EXCEEDED errors from
+	// Apple — its ABM API rate limit is undocumented and appears to be shared
+	// across every integration polling the same organization (e.g. an MDM's own
+	// ABM sync), not just axm2snipe's own request rate.
+	PageDelaySeconds int `yaml:"page_delay_seconds"`
+	// PageSize is the number of devices requested per orgDevices page (1-1000).
+	// Defaults to 100 if unset or zero.
+	PageSize int `yaml:"page_size"`
+}
+
+// PageDelay returns the configured delay between paginated orgDevices
+// requests, defaulting to 5 seconds if unset.
+func (c *ABMConfig) PageDelay() time.Duration {
+	if c.PageDelaySeconds <= 0 {
+		return 5 * time.Second
+	}
+	return time.Duration(c.PageDelaySeconds) * time.Second
+}
+
+// PageSizeOrDefault returns the configured orgDevices page size, defaulting to
+// 100 if unset and capping at Apple's documented maximum of 1000.
+func (c *ABMConfig) PageSizeOrDefault() int {
+	switch {
+	case c.PageSize <= 0:
+		return 100
+	case c.PageSize > 1000:
+		return 1000
+	default:
+		return c.PageSize
+	}
 }
 
 // SnipeITConfig holds Snipe-IT API settings.
@@ -48,6 +84,16 @@ type SnipeITConfig struct {
 	ComputerCategoryID       int    `yaml:"computer_category_id"`         // Category for computer models (Mac)
 	MobileCategoryID         int    `yaml:"mobile_category_id"`           // Category for mobile models (iPhone, iPad)
 	CustomFieldsetID         int    `yaml:"custom_fieldset_id"`           // Optional fieldset for new models
+
+	// ArchivedStatusID is the status label to apply when ABM reports a device
+	// as released from your organization (attrs.ReleasedFromOrgDateTime is
+	// set) — i.e. it's no longer expected to check in with your MDM. Applied
+	// on create, and on update unless the asset is already in some other
+	// archived-type status (e.g. Donated, Stolen, Lost) so those manual
+	// distinctions aren't clobbered. If a device's release date later clears
+	// (re-added to ABM), axm2snipe does NOT automatically restore the asset's
+	// previous status — that's a manual step. Leave unset (0) to disable.
+	ArchivedStatusID int `yaml:"archived_status_id"`
 }
 
 // SyncConfig holds sync behavior settings.

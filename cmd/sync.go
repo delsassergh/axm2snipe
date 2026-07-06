@@ -22,6 +22,8 @@ func NewSyncCmd() *cobra.Command {
 	cmd.Flags().String("serial", "", "Sync a single device by serial number (implies --force)")
 	cmd.Flags().Bool("use-cache", false, "Use cached data instead of fetching from ABM API")
 	cmd.Flags().Bool("update-only", false, "Only update existing assets, never create new ones")
+	cmd.Flags().Int("delay", 0, "Seconds to wait between paginated ABM device requests when not using --use-cache (overrides abm.page_delay_seconds, default 5)")
+	cmd.Flags().Int("page-size", 0, "Devices per page when fetching from ABM, max 1000 (overrides abm.page_size, default 100)")
 
 	return cmd
 }
@@ -32,6 +34,8 @@ func runSync(cmd *cobra.Command, args []string) error {
 	applyBoolFlag(cmd, "force", &Cfg.Sync.Force)
 	applyBoolFlag(cmd, "update-only", &Cfg.Sync.UpdateOnly)
 	applyBoolFlag(cmd, "use-cache", &Cfg.Sync.UseCache)
+	applyIntFlag(cmd, "delay", &Cfg.ABM.PageDelaySeconds)
+	applyIntFlag(cmd, "page-size", &Cfg.ABM.PageSize)
 
 	if err := Cfg.Validate(); err != nil {
 		return err

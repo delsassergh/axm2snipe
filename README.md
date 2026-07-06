@@ -13,9 +13,10 @@ Inspired by [jamf2snipe](https://github.com/grokability/jamf2snipe), but connect
 - Syncs all devices from Apple Business Manager / Apple School Manager into Snipe-IT as hardware assets
 - Matches existing Snipe-IT models by hardware identifier (e.g. `Mac16,10`), marketing name, or part number
 - Automatically creates Snipe-IT asset models for new device types, with optional device images from [appledb.dev](https://appledb.dev/)
+- Optional human-readable model metadata from appledb.dev (Apple regulatory model number, chip/SoC, release year) as asset-level custom fields — Snipe-IT has no per-model custom fields, so these fill in where the internal hardware identifier (e.g. `Mac16,10`) isn't enough to tell models apart at a glance
 - Automatically creates Snipe-IT suppliers from ABM/ASM purchase sources
 - Fetches AppleCare coverage details for each device
-- Matches existing assets by serial number (create or update)
+- Matches existing assets by serial number (create or update), resolved from a one-time preloaded index rather than a live API call per device, to stay well under Snipe-IT's own API rate limit on large syncs
 - Sync a single device by serial number with `sync --serial`
 - Timestamp-based change detection to skip unchanged records
 - Fully configurable field mapping between ABM/AppleCare attributes and Snipe-IT fields
@@ -108,6 +109,16 @@ axm2snipe sync -v
 # Sync from cached data (avoids ABM API calls)
 axm2snipe sync --use-cache -v
 
+# Download devices only, more slowly (useful if you're sharing Apple's
+# undocumented ABM rate limit with another tool, e.g. an MDM's own ABM sync,
+# and are seeing 429 RATE_LIMIT_EXCEEDED errors). If this is interrupted by a
+# 429, re-running the same command resumes from the last successful page
+# instead of starting over.
+axm2snipe download --devices --delay 15 -v
+
+# Same, but discard any saved resume progress and start from page one
+axm2snipe download --devices --restart -v
+
 # Sync a single device by serial number
 axm2snipe sync --serial ABCD1234XYZ -v
 
@@ -129,6 +140,13 @@ axm2snipe sync -v --log-file /var/log/axm2snipe.log
 # JSON logs to file
 axm2snipe sync -v --log-format json --log-file /var/log/axm2snipe.log
 
+# Attach appledb.dev images to existing models that don't have one yet
+# (e.g. models created before sync.model_images was enabled)
+axm2snipe backfill-images -v
+
+# Preview which models would get an image, without writing anything
+axm2snipe backfill-images --dry-run -v
+
 # Print an ABM access token (useful for manual API testing with curl)
 axm2snipe access-token
 
@@ -144,6 +162,7 @@ axm2snipe request https://mdmenrollment.apple.com/server/devices
 | `download` | Download ABM/ASM data to local cache |
 | `setup` | Create AXM custom fields in Snipe-IT and save mappings to config |
 | `test` | Test connections to ABM/ASM and Snipe-IT |
+| `backfill-images` | Attach AppleDB images to existing models that don't have one yet |
 | `access-token` | Print an ABM API access token |
 | `request <url>` | Make an authenticated ABM API GET request |
 
@@ -168,6 +187,19 @@ axm2snipe request https://mdmenrollment.apple.com/server/devices
 | `--use-cache` | Use cached data instead of fetching from ABM API |
 | `--update-only` | Only update existing assets, never create new ones |
 | `--cache-dir` | Directory for cached API responses (default: `.cache`) |
+| `--delay` | Seconds to wait between paginated ABM device requests when not using `--use-cache` (overrides `abm.page_delay_seconds`, default 5) |
+| `--page-size` | Devices per page when fetching from ABM, max 1000 (overrides `abm.page_size`, default 100) |
+
+### Download Flags
+
+| Flag | Description |
+| --- | --- |
+| `--progress` | Show progress bar during AppleCare coverage download |
+| `--devices` | Download only the device list (default: both) |
+| `--applecare` | Download only AppleCare coverage (uses cached devices if `--devices` not also set) |
+| `--delay` | Seconds to wait between paginated ABM device requests (overrides `abm.page_delay_seconds`, default 5). Increase this if you're hitting 429 `RATE_LIMIT_EXCEEDED` errors. |
+| `--page-size` | Devices per page when fetching from ABM, max 1000 (overrides `abm.page_size`, default 100) |
+| `--restart` | Ignore any saved device-fetch progress from an interrupted run and start from page one |
 
 ### Config Options
 
@@ -175,7 +207,9 @@ axm2snipe request https://mdmenrollment.apple.com/server/devices
 | --- | --- |
 | `sync.dry_run` | Same as `--dry-run` flag |
 | `sync.force` | Same as `--force` flag |
-| `sync.rate_limit` | Enable rate limiting for API calls |
+| `sync.rate_limit` | Enable rate limiting for Snipe-IT API calls (2 req/s, burst 5). Does **not** affect ABM API pacing — see `abm.page_delay_seconds` below. |
+| `abm.page_delay_seconds` | Seconds to wait between paginated ABM `orgDevices` requests during `download`/`sync` (default: 5). Apple's ABM API rate limit is undocumented and appears to be shared across every integration polling your organization (e.g. an MDM's own ABM sync), not just axm2snipe's own request rate — raise this if you see 429 `RATE_LIMIT_EXCEEDED` errors. |
+| `abm.page_size` | Devices per page when fetching from ABM, max 1000 (default: 100) |
 | `sync.update_only` | Only update existing assets, never create new assets/models/suppliers |
 | `sync.mdm_only` | Only sync devices that are assigned to an MDM server |
 | `sync.mdm_only_cache` | Also exclude non-MDM devices from the download cache (requires `mdm_only`) |
@@ -190,6 +224,7 @@ axm2snipe request https://mdmenrollment.apple.com/server/devices
 | `snipe_it.computer_category_id` | Category ID for Mac models (overrides `category_id` for Macs) |
 | `snipe_it.mobile_category_id` | Category ID for iPhone/iPad/Watch/Vision models |
 | `snipe_it.custom_fieldset_id` | Fieldset ID to attach to auto-created models |
+| `snipe_it.archived_status_id` | Status label to apply when ABM reports a device as released from your org (`releasedFromOrgDateTime` set) — i.e. no longer expected to check in with your MDM. Applied on create, and on update unless the asset is already in some other archived-type status (Donated, Stolen, Lost, etc.), which is left alone. Does **not** auto-restore the previous status if the release date later clears — that's a manual step. Leave unset to disable. |
 | `slack.enabled` | Enable Slack webhook notifications |
 | `slack.webhook_url` | Slack incoming webhook URL |
 
@@ -235,8 +270,16 @@ All field mappings are configured in `settings.yaml` under `sync.field_mapping`.
 | `ethernet_mac` | Ethernet MAC address(es), auto-formatted with colons |
 | `eid` | eSIM EID |
 | `added_to_org` | Date added to organization |
-| `released_from_org` | Date released from organization |
+| `released_from_org` | Date released from organization. Also drives the asset's Snipe-IT *status* (not just this field) if `snipe_it.archived_status_id` is configured — see Config Options above. |
 | `assigned_server` | Assigned MDM server name |
+
+**AppleDB.dev metadata** (looked up by `product_type`, cached per run):
+
+| Source value | Description |
+| --- | --- |
+| `apple_model_number` | Apple's printed regulatory model number (e.g. "A3238") -- distinct from `part_number`'s SKU (e.g. "MW0Y3LL/A") and `product_type`'s hardware identifier (e.g. "Mac16,10") |
+| `chip` | Chip/SoC name (e.g. "M4") |
+| `model_year` | Year the model was released (e.g. "2024") |
 
 **AppleCare coverage:**
 
@@ -278,6 +321,10 @@ sync:
     _snipeit_applecare_renewable_12: applecare_renewable
     _snipeit_applecare_payment_type_13: applecare_payment_type
     _snipeit_assigned_mdm_server_14: assigned_server
+    # AppleDB.dev metadata -> Snipe-IT custom fields
+    _snipeit_apple_model_number_15: apple_model_number
+    _snipeit_chip_16: chip
+    _snipeit_model_year_17: model_year
 ```
 
 ## Snipe-IT Custom Fields Setup
@@ -324,6 +371,9 @@ Alternatively, create them manually:
 | MEID | text | ANY | -- (comma-separated if multiple) |
 | Purchase Source | radio | ANY | Apple, Reseller, Manually Added |
 | Purchase Source ID | text | ANY | -- (Apple Customer Number or Reseller Number) |
+| Apple Model Number | text | ANY | -- (e.g. "A3238") |
+| Chip | text | ANY | -- (e.g. "M4") |
+| Model Year | text | ANY | -- (e.g. "2024") |
 
 ## Slack Notifications
 

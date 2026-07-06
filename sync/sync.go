@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -71,6 +72,21 @@ type Engine struct {
 	stats        Stats
 	cache        *ABMCache // populated when using --use-cache
 	ShowProgress bool      // show progress bars during download
+
+	// appleDBCache caches appledb.dev metadata lookups by hardware identifier
+	// (e.g. "Mac16,10") so devices/models sharing an identifier only trigger
+	// one network call per run. A nil value for a given key means the lookup
+	// was attempted and failed — this is cached too, so a bad/unknown
+	// identifier isn't retried on every device.
+	appleDBCache map[string]*appleDBDeviceInfo
+
+	// assetsBySerial indexes every existing Snipe-IT asset by lowercased
+	// serial, populated once by loadAssets. When non-nil, processDevice uses
+	// it instead of calling snipe.Client.GetAssetBySerial per device — see
+	// loadAssets for why. Multiple entries under one key mean Snipe-IT has
+	// duplicate assets for that serial, mirroring what a live lookup would
+	// find.
+	assetsBySerial map[string][]snipeit.Asset
 }
 
 // NewEngine creates a new sync engine.
@@ -95,6 +111,15 @@ func NewDownloadEngine(abmClient *abmclient.Client, cfg *config.Config) *Engine 
 	return &Engine{
 		abm: abmClient,
 		cfg: cfg,
+	}
+}
+
+// NewSnipeOnlyEngine creates a lightweight engine for Snipe-IT-only
+// operations (e.g. BackfillModelImages) that don't need an ABM client.
+func NewSnipeOnlyEngine(snipeClient *snipe.Client, cfg *config.Config) *Engine {
+	return &Engine{
+		snipe: snipeClient,
+		cfg:   cfg,
 	}
 }
 
@@ -124,7 +149,7 @@ func (e *Engine) FetchAndSaveDevices(ctx context.Context) ([]abmclient.Device, e
 	cacheDir := e.CacheDir()
 
 	log.Info("Fetching all devices from ABM...")
-	devices, _, err := e.abm.GetAllDevices(ctx)
+	devices, err := e.fetchAllDevicesPaced(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("fetching ABM devices: %w", err)
 	}
@@ -157,6 +182,102 @@ func (e *Engine) FetchAndSaveDevices(ctx context.Context) ([]abmclient.Device, e
 	}
 	log.Infof("Saved %d devices to %s/devices.json", len(devices), cacheDir)
 	return devices, nil
+}
+
+// devicesProgressFile stores org devices already fetched from a paginated
+// orgDevices pull, plus the URL of the next page, so an interrupted fetch
+// (e.g. a 429 partway through) can resume without re-requesting pages already
+// collected.
+const devicesProgressFile = "devices.progress.json"
+
+// devicesProgress is the on-disk resume state written by fetchOrgDevicesPaced.
+type devicesProgress struct {
+	Devices []abm.OrgDevice `json:"devices"`
+	NextURL string          `json:"next_url"`
+}
+
+// fetchAllDevicesPaced fetches every ABM device with its assigned MDM server
+// name resolved, using a paced pagination strategy (see fetchOrgDevicesPaced)
+// instead of the upstream library's all-at-once FetchAllOrgDevices. Used by
+// both FetchAndSaveDevices (download) and fetchABMDevices (sync without
+// --use-cache) so both paths get the same pacing and resume behavior.
+func (e *Engine) fetchAllDevicesPaced(ctx context.Context) ([]abmclient.Device, error) {
+	log.Info("Building device-to-MDM-server map...")
+	serverMap, smErr := e.abm.BuildDeviceServerMap(ctx)
+	if smErr != nil {
+		// Non-fatal: continue without server names, but warn since mdm_only
+		// filtering will treat all devices as unassigned if this fails.
+		log.WithError(smErr).Warn("Could not build device-server map; AssignedServer will be empty for all devices (mdm_only filtering may incorrectly skip managed devices)")
+		serverMap = make(map[string]string)
+	}
+
+	rawDevices, err := e.fetchOrgDevicesPaced(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	devices := make([]abmclient.Device, len(rawDevices))
+	for i, od := range rawDevices {
+		devices[i] = abmclient.Device{OrgDevice: od}
+		if name, ok := serverMap[od.ID]; ok {
+			devices[i].AssignedServer = name
+		}
+	}
+	return devices, nil
+}
+
+// fetchOrgDevicesPaced fetches all org devices via abmclient.FetchDevicesPaged,
+// pacing requests per Cfg.ABM.PageDelay()/PageSizeOrDefault() and persisting
+// progress to devices.progress.json after every page. If a previous run left
+// progress behind (e.g. it was interrupted by a 429), this resumes from where
+// it left off instead of starting over and re-spending API calls on pages
+// already collected.
+func (e *Engine) fetchOrgDevicesPaced(ctx context.Context) ([]abm.OrgDevice, error) {
+	cacheDir := e.CacheDir()
+	progressPath := filepath.Join(cacheDir, devicesProgressFile)
+
+	var collected []abm.OrgDevice
+	resume := ""
+	if data, rerr := os.ReadFile(progressPath); rerr == nil {
+		var p devicesProgress
+		if jerr := json.Unmarshal(data, &p); jerr == nil && p.NextURL != "" {
+			collected = p.Devices
+			resume = p.NextURL
+			log.Infof("Resuming device fetch from previous run (%d devices already collected)", len(collected))
+		}
+	}
+
+	opts := abmclient.PagedFetchOptions{
+		PageSize: e.cfg.ABM.PageSizeOrDefault(),
+		Delay:    e.cfg.ABM.PageDelay(),
+		Resume:   resume,
+	}
+
+	_, err := e.abm.FetchDevicesPaged(ctx, opts, func(page abmclient.PagedDevicesResult) error {
+		collected = append(collected, page.Devices...)
+		return writeJSON(cacheDir, devicesProgressFile, devicesProgress{Devices: collected, NextURL: page.NextURL})
+	})
+	if err != nil {
+		log.WithError(err).Warnf("Device fetch interrupted after %d devices; progress saved to %s/%s — re-run to resume from where it left off", len(collected), cacheDir, devicesProgressFile)
+		return nil, err
+	}
+
+	// Completed successfully — clean up the resume file.
+	if rmErr := os.Remove(progressPath); rmErr != nil && !os.IsNotExist(rmErr) {
+		log.WithError(rmErr).Debug("Could not remove devices progress file")
+	}
+	return collected, nil
+}
+
+// ResetDeviceProgress discards any saved paginated-device-fetch resume state
+// (see devicesProgressFile), forcing the next fetch to start from page one
+// instead of resuming. Used by `download --restart`.
+func (e *Engine) ResetDeviceProgress() error {
+	err := os.Remove(filepath.Join(e.CacheDir(), devicesProgressFile))
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 // loadDevicesFromCache reads only devices.json into e.cache.Devices without
@@ -416,6 +537,11 @@ func (e *Engine) Run(ctx context.Context) (*Stats, error) {
 	}
 	log.Infof("Loaded %d existing suppliers from Snipe-IT", len(e.suppliers))
 
+	if err := e.loadAssets(ctx); err != nil {
+		return nil, fmt.Errorf("loading snipe assets: %w", err)
+	}
+	log.Infof("Loaded %d existing assets from Snipe-IT", len(e.assetsBySerial))
+
 	// Step 2: Fetch all devices from ABM
 	devices, err := e.fetchABMDevices(ctx)
 	if err != nil {
@@ -443,6 +569,52 @@ func (e *Engine) Run(ctx context.Context) (*Stats, error) {
 		e.stats.Total, e.stats.Created, e.stats.Updated, e.stats.Skipped, e.stats.Errors, e.stats.ModelNew)
 
 	return &e.stats, nil
+}
+
+// BackfillModelImages fetches and attaches appledb.dev images to existing
+// Snipe-IT models that don't have one yet. Unlike ensureModel's image fetch
+// (which only runs at the moment a model is newly created), this can
+// retroactively fill in images for models created before sync.model_images
+// was enabled, or before CreateModel's image-attach bug (see CLAUDE.md) was
+// fixed. Only considers models under the configured Apple manufacturer_id
+// with a model_number set (appledb.dev is keyed by hardware identifier, e.g.
+// "Mac16,10", which is what ensureModel stores as model_number).
+func (e *Engine) BackfillModelImages(ctx context.Context) (updated int, skipped int, err error) {
+	models, err := e.snipe.ListAllModels(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("listing models: %w", err)
+	}
+
+	for _, m := range models {
+		if m.Image != "" || m.ModelNumber == "" || m.Manufacturer.ID != e.cfg.SnipeIT.ManufacturerID {
+			continue
+		}
+
+		logger := log.WithFields(logrus.Fields{"model": m.Name, "model_number": m.ModelNumber})
+
+		img := fetchModelImage(ctx, m.ModelNumber)
+		if img == "" {
+			logger.Warn("Could not fetch an image for this model from AppleDB")
+			skipped++
+			continue
+		}
+
+		if _, updErr := e.snipe.UpdateModelImage(ctx, m, img); updErr != nil {
+			if errors.Is(updErr, snipe.ErrDryRun) {
+				logger.Info("[DRY RUN] Would attach image")
+				updated++
+				continue
+			}
+			logger.WithError(updErr).Warn("Could not update model image")
+			skipped++
+			continue
+		}
+
+		logger.Info("Attached image to existing model")
+		updated++
+	}
+
+	return updated, skipped, nil
 }
 
 // loadModels fetches all models from Snipe-IT and builds a lookup map.
@@ -475,6 +647,48 @@ func (e *Engine) loadSuppliers(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// loadAssets fetches all existing assets from Snipe-IT and indexes them by
+// serial, so Run can decide create-vs-update for every device from memory
+// instead of calling snipe.Client.GetAssetBySerial once per device.
+//
+// Snipe-IT has no bulk create/update endpoint, so the per-device write
+// calls are unavoidable — but the byserial *lookup* that used to precede
+// every write is a plain paginated list under the hood, and Snipe-IT's API
+// throttle (60-120 req/min depending on instance config, per Snipe-IT's own
+// docs) makes thousands of individual lookups on a full sync a much bigger
+// rate-limit risk than the handful of paginated list calls this replaces
+// them with (500 assets per page, same page size loadModels/loadSuppliers
+// already use).
+func (e *Engine) loadAssets(ctx context.Context) error {
+	assets, err := e.snipe.ListAllAssets(ctx)
+	if err != nil {
+		return err
+	}
+	e.assetsBySerial = make(map[string][]snipeit.Asset, len(assets))
+	for _, a := range assets {
+		if a.Serial == "" {
+			continue
+		}
+		key := strings.ToLower(a.Serial)
+		e.assetsBySerial[key] = append(e.assetsBySerial[key], a)
+	}
+	return nil
+}
+
+// lookupExistingAsset resolves a device's serial to its existing Snipe-IT
+// asset(s). When loadAssets has populated the in-memory index (the normal
+// Run path), it's used directly with no API call. Otherwise (e.g.
+// RunSingle, which only ever processes one device and would gain nothing
+// from preloading the entire asset table) this falls back to a live
+// snipe.Client.GetAssetBySerial call.
+func (e *Engine) lookupExistingAsset(ctx context.Context, serial string) (*snipeit.AssetsResponse, error) {
+	if e.assetsBySerial != nil {
+		rows := e.assetsBySerial[strings.ToLower(serial)]
+		return &snipeit.AssetsResponse{Response: snipeit.Response{Total: len(rows)}, Rows: rows}, nil
+	}
+	return e.snipe.GetAssetBySerial(ctx, serial)
 }
 
 // ensureSupplier resolves the supplier for an ABM device and ensures it exists in Snipe-IT.
@@ -549,7 +763,7 @@ func (e *Engine) fetchABMDevices(ctx context.Context) ([]abmclient.Device, error
 		log.Infof("Using %d cached devices", len(allDevices))
 	} else {
 		var err error
-		allDevices, _, err = e.abm.GetAllDevices(ctx)
+		allDevices, err = e.fetchAllDevicesPaced(ctx)
 		if err != nil {
 			return nil, err
 		}
@@ -588,10 +802,12 @@ func (e *Engine) processDevice(ctx context.Context, device abmclient.Device) err
 		return nil
 	}
 
-	// Look up asset in Snipe-IT by serial first to decide create vs update
-	existing, err := e.snipe.GetAssetBySerial(ctx, serial)
+	// Look up asset in Snipe-IT by serial first to decide create vs update.
+	// snipe.Client.GetAssetBySerial's own error already identifies the
+	// serial, so it's returned as-is here rather than wrapped again.
+	existing, err := e.lookupExistingAsset(ctx, serial)
 	if err != nil {
-		return fmt.Errorf("looking up serial %s: %w", serial, err)
+		return err
 	}
 
 	if existing.Total == 0 && e.cfg.Sync.UpdateOnly {
@@ -715,7 +931,7 @@ func (e *Engine) ensureModel(ctx context.Context, attrs *abm.OrgDeviceAttributes
 	}
 
 	if e.cfg.Sync.ModelImages && attrs.ProductType != "" {
-		if img := fetchModelImage(ctx, attrs.ProductType); img != "" {
+		if img := appleDBImageDataURI(ctx, e.appleDBInfoFor(ctx, attrs.ProductType)); img != "" {
 			model.Image = img
 		}
 	}
@@ -755,6 +971,17 @@ func (e *Engine) createAsset(ctx context.Context, logger *logrus.Entry, device a
 		},
 	}
 
+	// If ABM already shows this device as released from the org (e.g. a
+	// historical device appearing for the first time), create it directly
+	// into the archived status instead of the default status.
+	if !attrs.ReleasedFromOrgDateTime.IsZero() {
+		if e.cfg.SnipeIT.ArchivedStatusID != 0 {
+			asset.StatusLabel.ID = e.cfg.SnipeIT.ArchivedStatusID
+		} else {
+			logger.Warn("Device was released from ABM org but snipe_it.archived_status_id is not configured; using default status instead")
+		}
+	}
+
 	if e.cfg.Sync.SetName {
 		name := attrs.DeviceModel
 		if attrs.Color != "" {
@@ -771,7 +998,7 @@ func (e *Engine) createAsset(ctx context.Context, logger *logrus.Entry, device a
 		}
 	}
 
-	e.applyFieldMapping(&asset, device, coverage)
+	e.applyFieldMapping(ctx, &asset, device, coverage)
 	applyWarrantyNotes(&asset, coverage)
 	// Always use serial as asset tag regardless of field_mapping overrides.
 	asset.AssetTag = attrs.SerialNumber
@@ -803,6 +1030,8 @@ func (e *Engine) createAsset(ctx context.Context, logger *logrus.Entry, device a
 
 // updateAsset updates an existing Snipe-IT asset with current ABM data.
 func (e *Engine) updateAsset(ctx context.Context, logger *logrus.Entry, device abmclient.Device, existing *snipeit.Asset, supplierID int, coverage *abmclient.CoverageResult) error {
+	attrs := device.Attributes
+
 	desired := snipeit.Asset{
 		CommonFields: snipeit.CommonFields{
 			CustomFields: make(map[string]string),
@@ -815,11 +1044,27 @@ func (e *Engine) updateAsset(ctx context.Context, logger *logrus.Entry, device a
 		}
 	}
 
+	// If ABM shows this device as released from the org, move it to the
+	// archived status — unless it's already in some other archived-type
+	// status (Donated, Stolen, Lost, etc.), which we leave alone rather than
+	// overwrite with a generic "Archived". If the release date later clears
+	// (device re-added to ABM), we deliberately do NOT auto-restore the
+	// previous status; that's left as a manual step in Snipe-IT.
+	if !attrs.ReleasedFromOrgDateTime.IsZero() && existing.StatusLabel.StatusType != "archived" {
+		if e.cfg.SnipeIT.ArchivedStatusID != 0 {
+			desired.StatusLabel = snipeit.StatusLabel{
+				CommonFields: snipeit.CommonFields{ID: e.cfg.SnipeIT.ArchivedStatusID},
+			}
+		} else {
+			logger.Warn("Device was released from ABM org but snipe_it.archived_status_id is not configured; leaving status unchanged")
+		}
+	}
+
 	// Seed notes from existing asset so applyWarrantyNotes replaces only the
 	// sentinel block and leaves any manual notes outside the block intact.
 	desired.Notes = existing.Notes
 
-	e.applyFieldMapping(&desired, device, coverage)
+	e.applyFieldMapping(ctx, &desired, device, coverage)
 	applyWarrantyNotes(&desired, coverage)
 	stripOrderInfoOnUpdate(&desired, existing, e.cfg.Sync.PreserveOrderInfoOnUpdate)
 
@@ -874,6 +1119,15 @@ func (e *Engine) diffAsset(desired *snipeit.Asset, existing *snipeit.Asset) *sni
 	// Compare supplier ID
 	if desired.Supplier.ID != 0 && desired.Supplier.ID != existing.Supplier.ID {
 		diff.Supplier = desired.Supplier
+		hasChanges = true
+	}
+
+	// Compare status label. Only ever set on desired by updateAsset's
+	// archived-status handling (see attrs.ReleasedFromOrgDateTime below) —
+	// axm2snipe otherwise never touches an asset's status on update, so a
+	// normal sync can't clobber a status someone set manually in Snipe-IT.
+	if desired.StatusLabel.ID != 0 && desired.StatusLabel.ID != existing.StatusLabel.ID {
+		diff.StatusLabel = desired.StatusLabel
 		hasChanges = true
 	}
 
@@ -945,7 +1199,7 @@ func (e *Engine) diffAsset(desired *snipeit.Asset, existing *snipeit.Asset) *sni
 // are routed to their corresponding Asset struct fields so they land in
 // Snipe-IT's built-in UI (Order Information, etc.) instead of as custom fields.
 // All other mapped keys go into CustomFields.
-func (e *Engine) applyFieldMapping(asset *snipeit.Asset, device abmclient.Device, coverage *abmclient.CoverageResult) {
+func (e *Engine) applyFieldMapping(ctx context.Context, asset *snipeit.Asset, device abmclient.Device, coverage *abmclient.CoverageResult) {
 	var ac *abmclient.AppleCareCoverage
 	if coverage != nil {
 		ac = coverage.Best
@@ -1032,6 +1286,25 @@ func (e *Engine) applyFieldMapping(asset *snipeit.Asset, device abmclient.Device
 		case "released_from_org", "releasedfromorg":
 			if !attrs.ReleasedFromOrgDateTime.IsZero() {
 				value = attrs.ReleasedFromOrgDateTime.Format("2006-01-02")
+			}
+
+		// --- appledb.dev metadata (looked up by ProductType, cached per run) ---
+		// These are not ABM fields — they come from the same appledb.dev
+		// lookup used for sync.model_images, exposed here so the printed
+		// regulatory model number, chip, and release year can be surfaced
+		// as human-readable custom fields (ProductType alone, e.g.
+		// "Mac16,10", isn't easy to eyeball at a glance).
+		case "apple_model_number", "regulatory_model_number":
+			if info := e.appleDBInfoFor(ctx, attrs.ProductType); info != nil {
+				value = info.RegulatoryModel
+			}
+		case "chip", "chipset", "soc":
+			if info := e.appleDBInfoFor(ctx, attrs.ProductType); info != nil {
+				value = info.Chip
+			}
+		case "model_year", "release_year":
+			if info := e.appleDBInfoFor(ctx, attrs.ProductType); info != nil {
+				value = info.ReleaseYear
 			}
 
 		// --- AppleCare coverage fields ---
@@ -1303,12 +1576,74 @@ func deviceSerial(d abmclient.Device) string {
 	return d.ID
 }
 
-// fetchModelImage fetches a device image from appledb.dev for the given
-// hardware identifier (e.g. "Mac16,10") and returns it as a base64 data URI
-// suitable for Snipe-IT's image field. Returns "" on any error.
-func fetchModelImage(ctx context.Context, productType string) string {
+// appleDBDeviceInfo holds selected metadata about a hardware identifier
+// (e.g. "Mac16,10") fetched from appledb.dev.
+type appleDBDeviceInfo struct {
+	ImageKey        string // used (with ColorKey) to build the device image URL
+	ColorKey        string // default color's key
+	RegulatoryModel string // Apple's printed regulatory model number, e.g. "A3238"
+	Chip            string // chip/SoC name, e.g. "M4"
+	ReleaseYear     string // year extracted from the release date, e.g. "2024"
+}
+
+// appleDBInfoFor returns cached (or freshly fetched) appledb.dev metadata for
+// the given hardware identifier. Results — including failed lookups (nil) —
+// are cached on the Engine so multiple devices/models sharing an identifier
+// only trigger one network call per run.
+func (e *Engine) appleDBInfoFor(ctx context.Context, productType string) *appleDBDeviceInfo {
+	if productType == "" {
+		return nil
+	}
+	if e.appleDBCache == nil {
+		e.appleDBCache = make(map[string]*appleDBDeviceInfo)
+	}
+	if info, ok := e.appleDBCache[productType]; ok {
+		return info
+	}
+	info := fetchAppleDBInfo(ctx, productType)
+	e.appleDBCache[productType] = info
+	return info
+}
+
+// appleDBFlexString unmarshals an appledb.dev field that's usually a single
+// JSON string but is sometimes an array of strings instead (observed on
+// "released" for some older/multi-revision devices, e.g. "MacBook10,1" --
+// presumably because such devices had multiple release dates across
+// regions/revisions). Taking the first element rather than failing keeps one
+// oddly-shaped field from breaking the whole lookup (and with it, the
+// device's image, which used to be fetched independently of this field).
+type appleDBFlexString string
+
+func (s *appleDBFlexString) UnmarshalJSON(data []byte) error {
+	if string(data) == "null" {
+		*s = ""
+		return nil
+	}
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		*s = appleDBFlexString(str)
+		return nil
+	}
+	var arr []string
+	if err := json.Unmarshal(data, &arr); err == nil {
+		if len(arr) > 0 {
+			*s = appleDBFlexString(arr[0])
+		}
+		return nil
+	}
+	// Unrecognized shape (e.g. an object) -- leave empty rather than fail
+	// the whole appledb.dev decode over one non-critical field.
+	return nil
+}
+
+// fetchAppleDBInfo fetches device metadata from appledb.dev for the given
+// hardware identifier (e.g. "Mac16,10"). Returns nil on any error.
+func fetchAppleDBInfo(ctx context.Context, productType string) *appleDBDeviceInfo {
 	type appleDBDevice struct {
-		ImageKey string `json:"imageKey"`
+		ImageKey string             `json:"imageKey"`
+		Model    []string           `json:"model"`
+		SOC      appleDBFlexString  `json:"soc"`
+		Released appleDBFlexString  `json:"released"`
 		Colors   []struct {
 			Key string `json:"key"`
 		} `json:"colors"`
@@ -1319,63 +1654,94 @@ func fetchModelImage(ctx context.Context, productType string) string {
 	infoURL := fmt.Sprintf("https://api.appledb.dev/device/%s.json", productType)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, infoURL, nil)
 	if err != nil {
-		return ""
+		return nil
 	}
-	infoResp, err := client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		log.WithField("product_type", productType).WithError(err).Debug("AppleDB device lookup failed")
-		return ""
+		log.WithField("product_type", productType).WithError(err).Warn("AppleDB device lookup failed")
+		return nil
 	}
-	defer infoResp.Body.Close()
-	if infoResp.StatusCode != http.StatusOK {
-		log.WithFields(logrus.Fields{"product_type": productType, "status": infoResp.StatusCode}).Debug("AppleDB returned non-200")
-		return ""
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		log.WithFields(logrus.Fields{"product_type": productType, "status": resp.StatusCode}).Warn("AppleDB returned non-200")
+		return nil
 	}
 
 	var dev appleDBDevice
-	if err := json.NewDecoder(infoResp.Body).Decode(&dev); err != nil || dev.ImageKey == "" || len(dev.Colors) == 0 {
-		log.WithField("product_type", productType).Debug("AppleDB response missing imageKey or colors")
+	if err := json.NewDecoder(resp.Body).Decode(&dev); err != nil {
+		log.WithField("product_type", productType).WithError(err).Warn("AppleDB response could not be decoded")
+		return nil
+	}
+
+	info := &appleDBDeviceInfo{ImageKey: dev.ImageKey, Chip: string(dev.SOC)}
+	if len(dev.Colors) > 0 {
+		info.ColorKey = dev.Colors[0].Key
+	}
+	if len(dev.Model) > 0 {
+		info.RegulatoryModel = dev.Model[0]
+	}
+	if len(dev.Released) >= 4 {
+		info.ReleaseYear = string(dev.Released)[:4]
+	}
+	return info
+}
+
+// appleDBImageDataURI downloads and validates the device image described by
+// info, returning a base64 data URI suitable for Snipe-IT's image field, or
+// "" on any failure (including a nil info, e.g. a failed metadata lookup).
+func appleDBImageDataURI(ctx context.Context, info *appleDBDeviceInfo) string {
+	if info == nil || info.ImageKey == "" || info.ColorKey == "" {
 		return ""
 	}
 
-	imgURL := fmt.Sprintf("https://img.appledb.dev/device@main/%s/%s.png", dev.ImageKey, dev.Colors[0].Key)
-	req, err = http.NewRequestWithContext(ctx, http.MethodGet, imgURL, nil)
+	client := &http.Client{Timeout: 10 * time.Second}
+	imgURL := fmt.Sprintf("https://img.appledb.dev/device@main/%s/%s.png", info.ImageKey, info.ColorKey)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, imgURL, nil)
 	if err != nil {
 		return ""
 	}
 	imgResp, err := client.Do(req)
 	if err != nil {
-		log.WithField("image_url", imgURL).WithError(err).Debug("AppleDB image fetch failed")
+		log.WithField("image_url", imgURL).WithError(err).Warn("AppleDB image fetch failed")
 		return ""
 	}
 	defer imgResp.Body.Close()
 	if imgResp.StatusCode != http.StatusOK {
-		log.WithFields(logrus.Fields{"image_url": imgURL, "status": imgResp.StatusCode}).Debug("AppleDB image returned non-200")
+		log.WithFields(logrus.Fields{"image_url": imgURL, "status": imgResp.StatusCode}).Warn("AppleDB image returned non-200")
 		return ""
 	}
 
 	// Validate content type and cap body size (2 MiB) before buffering.
 	const maxModelImageBytes = 2 << 20
 	if ct := imgResp.Header.Get("Content-Type"); ct != "" && !strings.HasPrefix(ct, "image/") {
-		log.WithFields(logrus.Fields{"image_url": imgURL, "content_type": ct}).Debug("AppleDB returned unexpected content type")
+		log.WithFields(logrus.Fields{"image_url": imgURL, "content_type": ct}).Warn("AppleDB returned unexpected content type")
 		return ""
 	}
 	imgBytes, err := io.ReadAll(io.LimitReader(imgResp.Body, maxModelImageBytes+1))
 	if err != nil {
-		log.WithField("image_url", imgURL).WithError(err).Debug("Reading AppleDB image failed")
+		log.WithField("image_url", imgURL).WithError(err).Warn("Reading AppleDB image failed")
 		return ""
 	}
 	if len(imgBytes) > maxModelImageBytes {
-		log.WithField("image_url", imgURL).Debug("AppleDB image too large, skipping")
+		log.WithField("image_url", imgURL).Warn("AppleDB image too large, skipping")
 		return ""
 	}
 	// Verify PNG magic bytes.
 	if len(imgBytes) < 8 || string(imgBytes[:8]) != "\x89PNG\r\n\x1a\n" {
-		log.WithField("image_url", imgURL).Debug("AppleDB image is not a valid PNG, skipping")
+		log.WithField("image_url", imgURL).Warn("AppleDB image is not a valid PNG, skipping")
 		return ""
 	}
 	log.WithField("image_url", imgURL).Debug("Fetched model image from AppleDB")
 	return "data:image/png;base64," + base64.StdEncoding.EncodeToString(imgBytes)
+}
+
+// fetchModelImage fetches a device image from appledb.dev for the given
+// hardware identifier (e.g. "Mac16,10") and returns it as a base64 data URI
+// suitable for Snipe-IT's image field. Returns "" on any error. Used by
+// BackfillModelImages, which is not tied to an Engine's appleDBCache (each
+// model is visited exactly once, so per-run caching wouldn't help there).
+func fetchModelImage(ctx context.Context, productType string) string {
+	return appleDBImageDataURI(ctx, fetchAppleDBInfo(ctx, productType))
 }
 
 // formatAssetDiff returns a human-readable summary of an asset diff for logging.

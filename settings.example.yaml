@@ -18,6 +18,17 @@ abm:
   # private_key: "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg..."
   # AXM_ABM_PRIVATE_KEY accepts all three formats as well.
 
+  # Seconds to wait between paginated ABM orgDevices requests during
+  # download/sync. Apple's ABM API rate limit is undocumented and appears to
+  # be shared across every integration polling your organization (e.g. an
+  # MDM's own ABM sync), not just axm2snipe's own request rate. Raise this if
+  # you see 429 RATE_LIMIT_EXCEEDED errors. Can also be set with `--delay`.
+  # page_delay_seconds: 5
+
+  # Devices per page when fetching from ABM (max 1000). Can also be set with
+  # `--page-size`.
+  # page_size: 100
+
 snipe_it:
   # Snipe-IT instance URL (no trailing slash)
   url: "https://snipe.example.com"
@@ -29,6 +40,14 @@ snipe_it:
 
   # Default status label ID for newly created assets
   default_status_id: 1
+
+  # Status label to apply when ABM reports a device as released from your org
+  # (releasedFromOrgDateTime set) -- i.e. no longer expected to check in with
+  # your MDM. Applied on create, and on update unless the asset is already in
+  # some other archived-type status (Donated, Stolen, Lost, etc.), which is
+  # left alone. Does NOT auto-restore the previous status if the release date
+  # later clears -- that's a manual step. Leave unset to disable.
+  # archived_status_id: 5
 
   # Category IDs for auto-created asset models
   computer_category_id: 2   # For Mac devices
@@ -45,7 +64,9 @@ sync:
   # Ignore timestamps and always update Snipe-IT from ABM
   force: false
 
-  # Enable rate limiting for API calls
+  # Enable rate limiting for Snipe-IT API calls (2 req/s, burst 5).
+  # This does NOT affect ABM API pacing — see abm.page_delay_seconds above,
+  # which is what to raise if you're hitting 429s from Apple.
   rate_limit: true
 
   # Only update existing assets, don't create new ones
@@ -102,6 +123,16 @@ sync:
   #   bluetooth_mac, ethernet_mac, eid, added_to_org, released_from_org,
   #   assigned_server
   #
+  # AppleDB.dev metadata (looked up by product_type, cached per run --
+  # requires network access to api.appledb.dev, same source used for
+  # sync.model_images):
+  #   apple_model_number  -- Apple's printed regulatory model number, e.g.
+  #                          "A3238" (distinct from part_number's SKU, e.g.
+  #                          "MW0Y3LL/A", and from product_type's hardware
+  #                          identifier, e.g. "Mac16,10")
+  #   chip                -- chip/SoC name, e.g. "M4"
+  #   model_year          -- year the model was released, e.g. "2024"
+  #
   # AppleCare coverage (fetched per device):
   #   applecare_status, applecare_agreement, applecare_description,
   #   applecare_start, applecare_end, applecare_renewable, applecare_payment_type
@@ -125,6 +156,9 @@ sync:
   #   MEID                 -> text, format: ANY (comma-separated if multiple)
   #   Purchase Source      -> radio, values: Apple/Reseller/Manually Added
   #   Purchase Source ID   -> text, format: ANY
+  #   Apple Model Number   -> text, format: ANY  (e.g. "A3238")
+  #   Chip                 -> text, format: ANY  (e.g. "M4")
+  #   Model Year           -> text, format: ANY  (e.g. "2024")
   #
   # field_mapping:
   #   _snipeit_wifi_mac_1: wifi_mac
@@ -142,6 +176,9 @@ sync:
   #   _snipeit_applecare_renewable_12: applecare_renewable
   #   _snipeit_applecare_payment_type_13: applecare_payment_type
   #   _snipeit_assigned_mdm_server_14: assigned_server
+  #   _snipeit_apple_model_number_15: apple_model_number
+  #   _snipeit_chip_16: chip
+  #   _snipeit_model_year_17: model_year
 
 # Optional Slack webhook notifications
 # Sends a message when a new device is created in Snipe-IT

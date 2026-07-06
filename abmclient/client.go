@@ -7,9 +7,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"golang.org/x/oauth2"
+
 	"github.com/CampusTech/abm"
 )
 
@@ -33,10 +36,17 @@ func SetLogOutput(output io.Writer) {
 // Client wraps an abm.Client with axm2snipe-specific helpers.
 type Client struct {
 	abm *abm.Client
+	// httpClient is a plain OAuth2-authenticated HTTP client sharing the same
+	// token source as abm, but WITHOUT the upstream library's fixed internal
+	// rate limiter. It's used by FetchDevicesPaged, which implements its own
+	// caller-controlled pacing instead (see PagedFetchOptions.Delay).
+	httpClient *http.Client
 }
 
 // NewClient creates a new ABM client using the abm library for auth.
-// Rate limiting and retry logic are handled by the upstream abm library.
+// Rate limiting and retry logic for most operations are handled by the
+// upstream abm library. FetchDevicesPaged is the exception: it paces itself
+// independently so callers can tune it (see PagedFetchOptions).
 func NewClient(ctx context.Context, clientID, keyID, privateKey string) (*Client, error) {
 	assertion, err := abm.NewAssertion(ctx, clientID, keyID, privateKey)
 	if err != nil {
@@ -53,7 +63,7 @@ func NewClient(ctx context.Context, clientID, keyID, privateKey string) (*Client
 		return nil, fmt.Errorf("creating ABM client: %w", err)
 	}
 
-	return &Client{abm: client}, nil
+	return &Client{abm: client, httpClient: oauth2.NewClient(ctx, ts)}, nil
 }
 
 // Device wraps an abm.OrgDevice with the resolved MDM server name.
