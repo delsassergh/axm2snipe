@@ -226,6 +226,34 @@ func (e *Engine) fetchAllDevicesPaced(ctx context.Context) ([]abmclient.Device, 
 	return devices, nil
 }
 
+// orgDeviceFields is the explicit fields[orgDevices] sparse fieldset we
+// request from ABM. This must be passed explicitly: Apple's /v1/orgDevices
+// endpoint does not return releasedFromOrgDateTime (or, seemingly, released
+// devices at all -- they were completely absent from the device list, not
+// just missing that one field) unless fields[orgDevices] is set and
+// includes it. Every field the rest of the sync engine reads via
+// abm.OrgDeviceAttributes is listed here so switching to an explicit
+// fieldset can't silently drop something that used to come back by
+// default. assignedServer and appleCareCoverage are deliberately excluded:
+// those are relationships (linked via their own endpoints), not attributes
+// -- resolved separately via BuildDeviceServerMap's MDM-server linkages and
+// a dedicated per-device AppleCare fetch. Note there is no distinct
+// "RELEASED" status value: a released device shows status=UNASSIGNED with
+// releasedFromOrgDateTime also set, per Apple's own example response.
+//
+// releaserId/releaserEntityType were tried and rejected outright by the API
+// ("... is not a valid field name") despite appearing in some Apple
+// documentation -- do not re-add them without confirming against a live
+// request first.
+var orgDeviceFields = []string{
+	"serialNumber", "addedToOrgDateTime", "releasedFromOrgDateTime",
+	"updatedDateTime",
+	"deviceModel", "productFamily", "productType", "deviceCapacity",
+	"partNumber", "orderNumber", "color", "status", "orderDateTime",
+	"imei", "meid", "eid", "purchaseSourceId", "purchaseSourceType",
+	"wifiMacAddress", "bluetoothMacAddress", "ethernetMacAddress",
+}
+
 // fetchOrgDevicesPaced fetches all org devices via abmclient.FetchDevicesPaged,
 // pacing requests per Cfg.ABM.PageDelay()/PageSizeOrDefault() and persisting
 // progress to devices.progress.json after every page. If a previous run left
@@ -248,6 +276,7 @@ func (e *Engine) fetchOrgDevicesPaced(ctx context.Context) ([]abm.OrgDevice, err
 	}
 
 	opts := abmclient.PagedFetchOptions{
+		Fields:   orgDeviceFields,
 		PageSize: e.cfg.ABM.PageSizeOrDefault(),
 		Delay:    e.cfg.ABM.PageDelay(),
 		Resume:   resume,

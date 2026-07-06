@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -31,6 +32,51 @@ func newPagedTestServer(onRequest func()) *httptest.Server {
 	server = httptest.NewServer(mux)
 	return server
 }
+
+// TestBuildOrgDevicesURL_IncludesFields is a regression test: axm2snipe used
+// to call FetchDevicesPaged with no Fields at all, and Apple's /v1/orgDevices
+// silently excluded released devices from the response entirely (not just
+// the releasedFromOrgDateTime attribute) unless fields[orgDevices] was
+// explicitly set. Every caller building this URL must pass an explicit
+// field list -- see sync.orgDeviceFields.
+func TestBuildOrgDevicesURL_IncludesFields(t *testing.T) {
+	u, err := buildOrgDevicesURL([]string{"serialNumber", "releasedFromOrgDateTime"}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := parsed.Query()
+	if got := q.Get("fields[orgDevices]"); got != "serialNumber,releasedFromOrgDateTime" {
+		t.Errorf("fields[orgDevices] = %q, want %q", got, "serialNumber,releasedFromOrgDateTime")
+	}
+	if got := q.Get("limit"); got != "100" {
+		t.Errorf("limit = %q, want \"100\"", got)
+	}
+}
+
+func TestBuildOrgDevicesURL_NoFieldsOmitsParam(t *testing.T) {
+	u, err := buildOrgDevicesURL(nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(u)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Query().Has("fields[orgDevices]") {
+		t.Error("fields[orgDevices] should be omitted when no fields are given")
+	}
+}
+
+// Note: FetchDevicesPaged's fresh-start (non-Resume) path builds its URL
+// against abm.DefaultAPIBaseURL, which isn't overridable for a local test
+// server -- so the fields[orgDevices] wiring is covered by
+// TestBuildOrgDevicesURL_IncludesFields (the URL builder itself) plus
+// sync.orgDeviceFields being passed into PagedFetchOptions.Fields at the one
+// production call site (sync.fetchOrgDevicesPaced).
 
 func TestFetchDevicesPaged_MultiplePages(t *testing.T) {
 	server := newPagedTestServer(nil)
