@@ -197,6 +197,7 @@ axm2snipe request https://mdmenrollment.apple.com/server/devices
 | `--progress` | Show progress bar during AppleCare coverage download |
 | `--devices` | Download only the device list (default: both) |
 | `--applecare` | Download only AppleCare coverage (uses cached devices if `--devices` not also set) |
+| `--applecare-full` | Re-fetch AppleCare coverage for every device instead of only devices missing from the cache (default: incremental). Run periodically (e.g. weekly) to catch `AXM: AppleCare Status` transitions like Active → Expired; leave off for routine/nightly downloads since it's much faster. |
 | `--delay` | Seconds to wait between paginated ABM device requests (overrides `abm.page_delay_seconds`, default 5). Increase this if you're hitting 429 `RATE_LIMIT_EXCEEDED` errors. |
 | `--page-size` | Devices per page when fetching from ABM, max 1000 (overrides `abm.page_size`, default 100) |
 | `--restart` | Ignore any saved device-fetch progress from an interrupted run and start from page one |

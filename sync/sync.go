@@ -73,6 +73,12 @@ type Engine struct {
 	cache        *ABMCache // populated when using --use-cache
 	ShowProgress bool      // show progress bars during download
 
+	// AppleCareFullRefresh forces FetchAndSaveAppleCare to re-fetch coverage
+	// for every device instead of skipping ones already present in
+	// applecare.json. See FetchAndSaveAppleCare for why the default
+	// (incremental) mode exists and when a full refresh is still needed.
+	AppleCareFullRefresh bool
+
 	// appleDBCache caches appledb.dev metadata lookups by hardware identifier
 	// (e.g. "Mac16,10") so devices/models sharing an identifier only trigger
 	// one network call per run. A nil value for a given key means the lookup
@@ -330,8 +336,39 @@ func (e *Engine) loadDevicesFromCache() error {
 	return nil
 }
 
+// filterDevicesNeedingAppleCare returns the subset of devices that need an
+// AppleCare API call: all of them if fullRefresh is true or existing is
+// empty (nothing cached yet, e.g. first run), otherwise only devices whose
+// ID isn't already a key in existing.
+func filterDevicesNeedingAppleCare(devices []abmclient.Device, existing map[string]*abmclient.CoverageResult, fullRefresh bool) []abmclient.Device {
+	if fullRefresh || len(existing) == 0 {
+		return devices
+	}
+	var toFetch []abmclient.Device
+	for _, d := range devices {
+		if _, ok := existing[d.ID]; !ok {
+			toFetch = append(toFetch, d)
+		}
+	}
+	return toFetch
+}
+
 // FetchAndSaveAppleCare fetches AppleCare coverage for the given device list
 // and writes applecare.json. If devices is nil, it loads devices from cache.
+//
+// By default this is incremental: any device that already has an entry in
+// the existing applecare.json is skipped, and only devices missing from
+// that cache (i.e. new to ABM since the last AppleCare pull) are fetched.
+// This matters because there's no bulk AppleCare endpoint -- it's one API
+// call per device, paced by the private abm library's own internal rate
+// limiter -- so a full pull across a large fleet can take hours even though
+// AppleCare coverage essentially never changes once a device is purchased.
+//
+// Set e.AppleCareFullRefresh to force a complete re-fetch of every device
+// instead. That's still worth doing periodically (e.g. weekly) rather than
+// never, since AXM: AppleCare Status can transition Active -> Expired over
+// time for a device that incremental mode would otherwise never look at
+// again once it has any cached entry.
 func (e *Engine) FetchAndSaveAppleCare(ctx context.Context, devices []abmclient.Device) error {
 	cacheDir := e.CacheDir()
 
@@ -345,11 +382,41 @@ func (e *Engine) FetchAndSaveAppleCare(ctx context.Context, devices []abmclient.
 		log.Infof("Loaded %d devices from cache for AppleCare refresh", len(devices))
 	}
 
-	log.Info("Fetching AppleCare coverage for all devices...")
-	appleCareMap := e.fetchAppleCareParallel(ctx, devices)
+	existing := make(map[string]*abmclient.CoverageResult)
+	if !e.AppleCareFullRefresh {
+		if data, err := os.ReadFile(filepath.Join(cacheDir, "applecare.json")); err == nil {
+			if jerr := json.Unmarshal(data, &existing); jerr != nil {
+				log.WithError(jerr).Warn("Could not parse existing applecare.json, falling back to a full AppleCare fetch")
+				existing = make(map[string]*abmclient.CoverageResult)
+			}
+		}
+	}
 
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
+	incremental := !e.AppleCareFullRefresh && len(existing) > 0
+	toFetch := filterDevicesNeedingAppleCare(devices, existing, e.AppleCareFullRefresh)
+	if incremental {
+		log.Infof("AppleCare cache already has coverage for %d/%d devices; fetching %d new device(s)", len(existing), len(devices), len(toFetch))
+	} else if e.AppleCareFullRefresh {
+		log.Info("Fetching AppleCare coverage for all devices (full refresh)...")
+	} else {
+		log.Info("Fetching AppleCare coverage for all devices...")
+	}
+
+	appleCareMap := existing
+	if len(toFetch) == 0 {
+		log.Info("No new devices need AppleCare coverage; applecare.json is already up to date")
+	} else {
+		fetched := e.fetchAppleCareParallel(ctx, toFetch)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if incremental {
+			for id, cov := range fetched {
+				appleCareMap[id] = cov
+			}
+		} else {
+			appleCareMap = fetched
+		}
 	}
 
 	if err := writeJSON(cacheDir, "applecare.json", appleCareMap); err != nil {

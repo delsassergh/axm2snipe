@@ -1266,6 +1266,93 @@ func TestLoadCache_MissingAppleCare(t *testing.T) {
 	}
 }
 
+// --- Incremental AppleCare tests ---
+
+func TestFilterDevicesNeedingAppleCare_FirstRunFetchesAll(t *testing.T) {
+	devices := []abmclient.Device{
+		makeDevice("D1", "SN001", "Mac", "Mac16,10"),
+		makeDevice("D2", "SN002", "Mac", "Mac14,7"),
+	}
+	got := filterDevicesNeedingAppleCare(devices, map[string]*abmclient.CoverageResult{}, false)
+	if len(got) != 2 {
+		t.Errorf("expected all %d devices fetched on first run (empty cache), got %d", len(devices), len(got))
+	}
+}
+
+func TestFilterDevicesNeedingAppleCare_SkipsAlreadyCached(t *testing.T) {
+	devices := []abmclient.Device{
+		makeDevice("D1", "SN001", "Mac", "Mac16,10"),
+		makeDevice("D2", "SN002", "Mac", "Mac14,7"),
+	}
+	existing := map[string]*abmclient.CoverageResult{
+		"D1": {},
+	}
+	got := filterDevicesNeedingAppleCare(devices, existing, false)
+	if len(got) != 1 || got[0].ID != "D2" {
+		t.Errorf("expected only D2 (new device) to need fetching, got %+v", got)
+	}
+}
+
+func TestFilterDevicesNeedingAppleCare_NoneNeeded(t *testing.T) {
+	devices := []abmclient.Device{makeDevice("D1", "SN001", "Mac", "Mac16,10")}
+	existing := map[string]*abmclient.CoverageResult{"D1": {}}
+	got := filterDevicesNeedingAppleCare(devices, existing, false)
+	if len(got) != 0 {
+		t.Errorf("expected no devices to need fetching when all are cached, got %+v", got)
+	}
+}
+
+func TestFilterDevicesNeedingAppleCare_FullRefreshIgnoresCache(t *testing.T) {
+	devices := []abmclient.Device{
+		makeDevice("D1", "SN001", "Mac", "Mac16,10"),
+		makeDevice("D2", "SN002", "Mac", "Mac14,7"),
+	}
+	existing := map[string]*abmclient.CoverageResult{
+		"D1": {},
+		"D2": {},
+	}
+	got := filterDevicesNeedingAppleCare(devices, existing, true)
+	if len(got) != 2 {
+		t.Errorf("expected --applecare-full to re-fetch all %d devices despite full cache, got %d", len(devices), len(got))
+	}
+}
+
+// TestFetchAndSaveAppleCare_SkipsABMWhenAllDevicesCached is a regression test
+// for the incremental AppleCare fetch: if every device already has a cached
+// AppleCare entry, FetchAndSaveAppleCare must not call out to ABM at all. It
+// verifies this by leaving e.abm nil -- fetchAppleCareParallel would panic on
+// a nil ABM client if it were invoked, so a clean pass proves the ABM call
+// was skipped entirely.
+func TestFetchAndSaveAppleCare_SkipsABMWhenAllDevicesCached(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	devices := []abmclient.Device{
+		makeDevice("D1", "SN001", "Mac", "Mac16,10"),
+		makeDevice("D2", "SN002", "Mac", "Mac14,7"),
+	}
+	acRecord := abmclient.AppleCareCoverage{Status: "ACTIVE", Description: "AppleCare+ for Mac"}
+	existing := map[string]*abmclient.CoverageResult{
+		"D1": {Best: &acRecord, All: []abmclient.AppleCareCoverage{acRecord}},
+		"D2": {Best: &acRecord, All: []abmclient.AppleCareCoverage{acRecord}},
+	}
+	if err := writeJSON(tmpDir, "applecare.json", existing); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &Engine{cfg: &config.Config{Sync: config.SyncConfig{CacheDir: tmpDir}}} // e.abm is nil
+	if err := e.FetchAndSaveAppleCare(context.Background(), devices); err != nil {
+		t.Fatalf("FetchAndSaveAppleCare returned error: %v (should have skipped ABM entirely)", err)
+	}
+
+	e2 := &Engine{cfg: &config.Config{Sync: config.SyncConfig{CacheDir: tmpDir}}}
+	if err := e2.LoadCache(); err != nil {
+		t.Fatal(err)
+	}
+	if len(e2.cache.AppleCare) != 2 {
+		t.Errorf("expected the 2 pre-cached AppleCare records to survive untouched, got %d", len(e2.cache.AppleCare))
+	}
+}
+
 func TestCacheDir_Default(t *testing.T) {
 	e := &Engine{cfg: &config.Config{}}
 	if e.CacheDir() != ".cache" {
