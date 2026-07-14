@@ -41,6 +41,7 @@ func runImportReleased(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  Released devices in CSV: %d\n", stats.CSVReleased)
 		fmt.Printf("  Already cached:          %d\n", stats.AlreadyKnown)
 		fmt.Printf("  Fetched this run:        %d\n", stats.Fetched)
+		fmt.Printf("  CSV fallbacks this run:  %d\n", stats.CSVFallback)
 		fmt.Printf("  Failed this run:         %d\n", stats.Failed)
 		fmt.Printf("  Persistent cache total:  %d\n", stats.CachedTotal)
 	}

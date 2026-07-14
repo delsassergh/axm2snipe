@@ -113,7 +113,9 @@ axm2snipe sync --use-cache -v
 # One-time historical released-device bootstrap. Export all devices from ABM,
 # then use the CSV to discover released serials that Apple's bulk and audit
 # APIs no longer expose. The command checkpoints every 10 devices and is safe
-# to rerun after interruption. Follow it with a cached sync.
+# to rerun after interruption. If Apple permanently returns 404 for an older
+# serial, the available device attributes are imported directly from the CSV.
+# Follow it with a cached sync.
 axm2snipe import-released --csv ./All_ABM_Assets.csv -v
 axm2snipe sync --use-cache -v
 

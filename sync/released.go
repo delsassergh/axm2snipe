@@ -4,12 +4,17 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
+	"github.com/CampusTech/abm"
 	"github.com/CampusTech/axm2snipe/abmclient"
 )
 
@@ -25,6 +30,7 @@ type ReleasedImportStats struct {
 	CSVReleased  int
 	AlreadyKnown int
 	Fetched      int
+	CSVFallback  int
 	Failed       int
 	CachedTotal  int
 }
@@ -35,10 +41,11 @@ type ReleasedImportStats struct {
 // single-device endpoint, which continues to return released devices even
 // though the bulk endpoint omits them.
 func (e *Engine) ImportReleasedDevicesCSV(ctx context.Context, csvPath string) (*ReleasedImportStats, error) {
-	serials, err := releasedSerialsFromCSV(csvPath)
+	csvDevices, err := releasedDevicesFromCSV(csvPath)
 	if err != nil {
 		return nil, err
 	}
+	serials := sortedDeviceSerials(csvDevices)
 
 	persistent, err := e.loadPersistentReleasedDevices()
 	if err != nil {
@@ -68,6 +75,16 @@ func (e *Engine) ImportReleasedDevicesCSV(ctx context.Context, csvPath string) (
 		}
 		device, fetchErr := e.abm.GetDeviceInfo(ctx, serial)
 		if fetchErr != nil {
+			if isABMNotFound(fetchErr) {
+				fallback := csvDevices[normalizeSerial(serial)]
+				persistent = append(persistent, fallback)
+				known[normalizeSerial(serial)] = fallback
+				stats.CSVFallback++
+				stats.CachedTotal = len(persistent)
+				successesSinceCheckpoint++
+				log.WithField("serial", serial).Warn("Apple no longer returns this released device; using the Apple CSV record")
+				continue
+			}
 			stats.Failed++
 			failedSerials = append(failedSerials, serial)
 			log.WithError(fetchErr).WithField("serial", serial).Warn("Could not fetch historical released device; rerun the import to retry")
@@ -102,6 +119,27 @@ func (e *Engine) ImportReleasedDevicesCSV(ctx context.Context, csvPath string) (
 }
 
 func releasedSerialsFromCSV(path string) ([]string, error) {
+	devices, err := releasedDevicesFromCSV(path)
+	if err != nil {
+		return nil, err
+	}
+	return sortedDeviceSerials(devices), nil
+}
+
+func sortedDeviceSerials(devices map[string]abmclient.Device) []string {
+	keys := make([]string, 0, len(devices))
+	for key := range devices {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	serials := make([]string, 0, len(keys))
+	for _, key := range keys {
+		serials = append(serials, deviceSerial(devices[key]))
+	}
+	return serials
+}
+
+func releasedDevicesFromCSV(path string) (map[string]abmclient.Device, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening Apple device export %s: %w", path, err)
@@ -124,8 +162,7 @@ func releasedSerialsFromCSV(path string) ([]string, error) {
 		return nil, fmt.Errorf("Apple device export must contain %s and %s columns", releasedCSVSerialColumn, releasedCSVDateColumn)
 	}
 
-	var serials []string
-	seen := make(map[string]bool)
+	devices := make(map[string]abmclient.Device)
 	for row := 2; ; row++ {
 		record, readErr := r.Read()
 		if readErr == io.EOF {
@@ -139,13 +176,115 @@ func releasedSerialsFromCSV(path string) ([]string, error) {
 		}
 		serial := strings.TrimSpace(record[serialCol])
 		key := normalizeSerial(serial)
-		if key == "" || seen[key] {
+		if key == "" {
 			continue
 		}
-		seen[key] = true
-		serials = append(serials, serial)
+		if _, exists := devices[key]; exists {
+			continue
+		}
+		device, parseErr := releasedDeviceFromCSVRecord(columns, record)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parsing Apple device export row %d: %w", row, parseErr)
+		}
+		devices[key] = device
 	}
-	return serials, nil
+	return devices, nil
+}
+
+func releasedDeviceFromCSVRecord(columns map[string]int, record []string) (abmclient.Device, error) {
+	serial := csvRecordValue(columns, record, releasedCSVSerialColumn)
+	released, err := parseCSVTime(csvRecordValue(columns, record, releasedCSVDateColumn))
+	if err != nil {
+		return abmclient.Device{}, fmt.Errorf("invalid release date for %s: %w", serial, err)
+	}
+	added, err := parseCSVTime(csvRecordValue(columns, record, "DATE_ADDED_TO_ORGANIZATION"))
+	if err != nil {
+		return abmclient.Device{}, fmt.Errorf("invalid added date for %s: %w", serial, err)
+	}
+	purchaseType, purchaseID := parseCSVPurchaseSource(csvRecordValue(columns, record, "PURCHASE_SOURCE"))
+
+	attrs := &abm.OrgDeviceAttributes{
+		SerialNumber:            serial,
+		AddedToOrgDateTime:      added,
+		ReleasedFromOrgDateTime: released,
+		UpdatedDateTime:         released,
+		DeviceModel:             csvRecordValue(columns, record, "MODEL_NAME"),
+		ProductFamily:           abm.OrgDeviceAttributesProductFamily(csvRecordValue(columns, record, "PRODUCT_FAMILY")),
+		PartNumber:              csvRecordValue(columns, record, "PART_NUMBER"),
+		DeviceCapacity:          csvRecordValue(columns, record, "DEVICE_CAPACITY"),
+		Color:                   csvRecordValue(columns, record, "COLOR"),
+		PurchaseSourceType:      purchaseType,
+		PurchaseSourceID:        purchaseID,
+		OrderNumber:             csvRecordValue(columns, record, "ORDER_NUMBER"),
+		Status:                  abm.StatusUnAssigned,
+	}
+	attrs.IMEI = nonEmptyCSVValues(csvRecordValue(columns, record, "IMEI"), csvRecordValue(columns, record, "IMEI2"))
+	attrs.MEID = nonEmptyCSVValues(csvRecordValue(columns, record, "MEID"))
+	attrs.WifiMacAddress = abm.FlexStringSlice(nonEmptyCSVValues(csvRecordValue(columns, record, "WIFI_MAC_ADDRESS")))
+	attrs.BluetoothMacAddress = abm.FlexStringSlice(nonEmptyCSVValues(csvRecordValue(columns, record, "BLUETOOTH_MAC_ADDRESS")))
+	attrs.EthernetMacAddress = nonEmptyCSVValues(
+		csvRecordValue(columns, record, "ETHERNET_MAC_ADDRESS_1"),
+		csvRecordValue(columns, record, "ETHERNET_MAC_ADDRESS_2"),
+		csvRecordValue(columns, record, "ETHERNET_MAC_ADDRESS_3"),
+	)
+	id := csvRecordValue(columns, record, "DEVICE_ID")
+	if id == "" {
+		id = serial
+	}
+	return abmclient.Device{OrgDevice: abm.OrgDevice{ID: id, Type: "orgDevices", Attributes: attrs}}, nil
+}
+
+func csvRecordValue(columns map[string]int, record []string, name string) string {
+	i, ok := columns[name]
+	if !ok || i >= len(record) {
+		return ""
+	}
+	return strings.TrimSpace(record[i])
+}
+
+func parseCSVTime(value string) (time.Time, error) {
+	if value == "" {
+		return time.Time{}, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return parsed, nil
+}
+
+func parseCSVPurchaseSource(value string) (abm.OrgDeviceAttributesPurchaseSourceType, string) {
+	value = strings.TrimSpace(value)
+	upper := strings.ToUpper(value)
+	var sourceType abm.OrgDeviceAttributesPurchaseSourceType
+	switch {
+	case strings.HasPrefix(upper, "APPLE"):
+		sourceType = abm.PurchaseSourceTypeApple
+	case strings.HasPrefix(upper, "RESELLER"):
+		sourceType = abm.PurchaseSourceTypeReseller
+	case strings.HasPrefix(upper, "MANUALLY ADDED"):
+		sourceType = abm.PurchaseSourceTypeManuallyAdded
+	}
+	start := strings.LastIndex(value, "(")
+	if start >= 0 && strings.HasSuffix(value, ")") {
+		return sourceType, strings.TrimSpace(value[start+1 : len(value)-1])
+	}
+	return sourceType, ""
+}
+
+func nonEmptyCSVValues(values ...string) []string {
+	var result []string
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
+func isABMNotFound(err error) bool {
+	var apiErr *abm.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 // loadPersistentReleasedDevices also seeds from released records already in

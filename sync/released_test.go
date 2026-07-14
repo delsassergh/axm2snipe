@@ -1,6 +1,8 @@
 package sync
 
 import (
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -48,6 +50,46 @@ func TestReleasedSerialsFromCSVRequiresAppleHeaders(t *testing.T) {
 	}
 	if _, err := releasedSerialsFromCSV(path); err == nil {
 		t.Fatal("expected missing-header error")
+	}
+}
+
+func TestReleasedDevicesFromCSVBuildsFallbackRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "devices.csv")
+	data := "SERIAL_NO,DEVICE_ID,PRODUCT_FAMILY,MODEL_NAME,PART_NUMBER,DEVICE_CAPACITY,COLOR,PURCHASE_SOURCE,ORDER_NUMBER,DATE_ADDED_TO_ORGANIZATION,DATE_REMOVED_FROM_ORGANIZATION,IMEI,IMEI2,MEID,WIFI_MAC_ADDRESS,BLUETOOTH_MAC_ADDRESS,ETHERNET_MAC_ADDRESS_1,ETHERNET_MAC_ADDRESS_2\n" +
+		"SER1,DEV1,Mac,MacBook Pro,ABC123,512GB,SPACE GRAY,Apple (1146073),ORDER1,2020-01-02T03:04:05Z,2022-06-07T08:09:10Z,I1,I2,M1,AA,BB,CC,DD\n"
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	devices, err := releasedDevicesFromCSV(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device := devices["SER1"]
+	attrs := device.Attributes
+	if device.ID != "DEV1" || attrs == nil {
+		t.Fatalf("unexpected fallback identity: %+v", device)
+	}
+	if attrs.SerialNumber != "SER1" || attrs.DeviceModel != "MacBook Pro" || attrs.PartNumber != "ABC123" {
+		t.Fatalf("unexpected fallback attributes: %+v", attrs)
+	}
+	if got := attrs.ReleasedFromOrgDateTime.Format(time.RFC3339); got != "2022-06-07T08:09:10Z" {
+		t.Fatalf("release date = %s", got)
+	}
+	if attrs.PurchaseSourceType != abm.PurchaseSourceTypeApple || attrs.PurchaseSourceID != "1146073" {
+		t.Fatalf("purchase source = %q/%q", attrs.PurchaseSourceType, attrs.PurchaseSourceID)
+	}
+	if !reflect.DeepEqual(attrs.IMEI, []string{"I1", "I2"}) || !reflect.DeepEqual(attrs.EthernetMacAddress, []string{"CC", "DD"}) {
+		t.Fatalf("network/identity fields not preserved: %+v", attrs)
+	}
+}
+
+func TestIsABMNotFound(t *testing.T) {
+	err := fmt.Errorf("wrapped: %w", &abm.APIError{StatusCode: http.StatusNotFound})
+	if !isABMNotFound(err) {
+		t.Fatal("wrapped ABM 404 was not recognized")
+	}
+	if isABMNotFound(&abm.APIError{StatusCode: http.StatusTooManyRequests}) {
+		t.Fatal("non-404 ABM error was recognized as not found")
 	}
 }
 
