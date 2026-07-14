@@ -82,6 +82,8 @@ func (c *Client) FetchDevicesPaged(ctx context.Context, opts PagedFetchOptions, 
 			}
 		}
 
+		log.Debugf("Fetching orgDevices page: %s", current)
+
 		req, reqErr := http.NewRequestWithContext(ctx, http.MethodGet, current, nil)
 		if reqErr != nil {
 			return current, fmt.Errorf("build request: %w", reqErr)

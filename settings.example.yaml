@@ -29,6 +29,18 @@ abm:
   # `--page-size`.
   # page_size: 100
 
+  # How far back (in days) to scan Apple's audit events log for devices
+  # released from the org. This exists because /v1/orgDevices (the bulk
+  # device list) never returns released devices no matter what fields are
+  # requested -- released devices are recovered separately via
+  # GET /v1/auditEvents?filter[type]=DEVICE_REMOVED_FROM_ORG and then a
+  # single-device lookup, which does work. Default: 1095 (3 years). Apple's
+  # docs don't state a maximum query range or retention period, and the API
+  # may return less history than requested. Use `import-released --csv ...`
+  # once with an Apple device export to seed older releases; those records are
+  # persisted in released-devices.json and preserved by future downloads.
+  # release_lookback_days: 1095
+
 snipe_it:
   # Snipe-IT instance URL (no trailing slash)
   url: "https://snipe.example.com"

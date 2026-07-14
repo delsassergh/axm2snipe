@@ -27,11 +27,11 @@ var (
 	// Version is the application version, set from main.go.
 	Version string
 
-	verbose    bool
-	debug      bool
-	logFile    string
-	logFormat  string
-	logFileFD  *os.File // held open for the lifetime of the process
+	verbose   bool
+	debug     bool
+	logFile   string
+	logFormat string
+	logFileFD *os.File // held open for the lifetime of the process
 )
 
 var log = logrus.New()
@@ -240,14 +240,15 @@ func Execute() {
 	accessTokenCmd := NewAccessTokenCmd()
 	requestCmd := NewRequestCmd()
 	backfillImagesCmd := NewBackfillImagesCmd()
+	importReleasedCmd := NewImportReleasedCmd()
 
 	// --dry-run: sync, setup, backfill-images
 	for _, cmd := range []*cobra.Command{syncCmd, setupCmd, backfillImagesCmd} {
 		cmd.Flags().Bool("dry-run", false, "Simulate without making changes")
 	}
 
-	// --cache-dir: download, sync, setup
-	for _, cmd := range []*cobra.Command{downloadCmd, syncCmd, setupCmd} {
+	// --cache-dir: download, sync, setup, import-released
+	for _, cmd := range []*cobra.Command{downloadCmd, syncCmd, setupCmd, importReleasedCmd} {
 		cmd.Flags().String("cache-dir", "", `Directory for cached API responses (default ".cache")`)
 	}
 
@@ -258,6 +259,7 @@ func Execute() {
 	rootCmd.AddCommand(accessTokenCmd)
 	rootCmd.AddCommand(requestCmd)
 	rootCmd.AddCommand(backfillImagesCmd)
+	rootCmd.AddCommand(importReleasedCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

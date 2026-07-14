@@ -11,6 +11,7 @@ Inspired by [jamf2snipe](https://github.com/grokability/jamf2snipe), but connect
 ## Features
 
 - Syncs all devices from Apple Business Manager / Apple School Manager into Snipe-IT as hardware assets
+- Recovers newly released devices from Apple's audit API and supports a resumable one-time CSV bootstrap for releases older than Apple's available audit history
 - Matches existing Snipe-IT models by hardware identifier (e.g. `Mac16,10`), marketing name, or part number
 - Automatically creates Snipe-IT asset models for new device types, with optional device images from [appledb.dev](https://appledb.dev/)
 - Optional human-readable model metadata from appledb.dev (Apple regulatory model number, chip/SoC, release year) as asset-level custom fields — Snipe-IT has no per-model custom fields, so these fill in where the internal hardware identifier (e.g. `Mac16,10`) isn't enough to tell models apart at a glance
@@ -109,6 +110,13 @@ axm2snipe sync -v
 # Sync from cached data (avoids ABM API calls)
 axm2snipe sync --use-cache -v
 
+# One-time historical released-device bootstrap. Export all devices from ABM,
+# then use the CSV to discover released serials that Apple's bulk and audit
+# APIs no longer expose. The command checkpoints every 10 devices and is safe
+# to rerun after interruption. Follow it with a cached sync.
+axm2snipe import-released --csv ./All_ABM_Assets.csv -v
+axm2snipe sync --use-cache -v
+
 # Download devices only, more slowly (useful if you're sharing Apple's
 # undocumented ABM rate limit with another tool, e.g. an MDM's own ABM sync,
 # and are seeing 429 RATE_LIMIT_EXCEEDED errors). If this is interrupted by a
@@ -163,6 +171,7 @@ axm2snipe request https://mdmenrollment.apple.com/server/devices
 | `setup` | Create AXM custom fields in Snipe-IT and save mappings to config |
 | `test` | Test connections to ABM/ASM and Snipe-IT |
 | `backfill-images` | Attach AppleDB images to existing models that don't have one yet |
+| `import-released --csv <file>` | Resumable import of historical released devices from an Apple device-export CSV into the persistent cache |
 | `access-token` | Print an ABM API access token |
 | `request <url>` | Make an authenticated ABM API GET request |
 
@@ -211,6 +220,7 @@ axm2snipe request https://mdmenrollment.apple.com/server/devices
 | `sync.rate_limit` | Enable rate limiting for Snipe-IT API calls (2 req/s, burst 5). Does **not** affect ABM API pacing — see `abm.page_delay_seconds` below. |
 | `abm.page_delay_seconds` | Seconds to wait between paginated ABM `orgDevices` requests during `download`/`sync` (default: 5). Apple's ABM API rate limit is undocumented and appears to be shared across every integration polling your organization (e.g. an MDM's own ABM sync), not just axm2snipe's own request rate — raise this if you see 429 `RATE_LIMIT_EXCEEDED` errors. |
 | `abm.page_size` | Devices per page when fetching from ABM, max 1000 (default: 100) |
+| `abm.release_lookback_days` | How far back to request released-device audit events (default: 1095 days / 3 years). Apple may return less history than requested; use `import-released` once for older releases. |
 | `sync.update_only` | Only update existing assets, never create new assets/models/suppliers |
 | `sync.mdm_only` | Only sync devices that are assigned to an MDM server |
 | `sync.mdm_only_cache` | Also exclude non-MDM devices from the download cache (requires `mdm_only`) |

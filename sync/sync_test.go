@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	snipeit "github.com/michellepellon/go-snipeit"
 	"github.com/CampusTech/abm"
+	snipeit "github.com/michellepellon/go-snipeit"
 
 	"github.com/CampusTech/axm2snipe/abmclient"
 	"github.com/CampusTech/axm2snipe/config"
@@ -47,8 +47,8 @@ func TestFormatMAC(t *testing.T) {
 		{"2CCA164BD29D", "2C:CA:16:4B:D2:9D"},
 		{"aabbccddeeff", "AA:BB:CC:DD:EE:FF"},
 		{"2C:CA:16:4B:D2:9D", "2C:CA:16:4B:D2:9D"}, // already formatted
-		{"AA-BB-CC-DD-EE-FF", "AA:BB:CC:DD:EE:FF"},   // dash-separated
-		{"short", "short"},                             // too short
+		{"AA-BB-CC-DD-EE-FF", "AA:BB:CC:DD:EE:FF"}, // dash-separated
+		{"short", "short"},                         // too short
 		{"", ""},
 	}
 	for _, tt := range tests {
@@ -186,7 +186,7 @@ func TestDiffAsset_BooleanNormalization(t *testing.T) {
 	desired := &snipeit.Asset{
 		CommonFields: snipeit.CommonFields{
 			CustomFields: map[string]string{
-				"_snipeit_renewable_1":   "false",
+				"_snipeit_renewable_1":    "false",
 				"_snipeit_mdm_assigned_2": "true",
 			},
 		},
@@ -194,7 +194,7 @@ func TestDiffAsset_BooleanNormalization(t *testing.T) {
 	existing := &snipeit.Asset{
 		CommonFields: snipeit.CommonFields{
 			CustomFields: map[string]string{
-				"_snipeit_renewable_1":   "0", // Snipe-IT stores "0" for false
+				"_snipeit_renewable_1":    "0", // Snipe-IT stores "0" for false
 				"_snipeit_mdm_assigned_2": "1", // Snipe-IT stores "1" for true
 			},
 		},
@@ -397,10 +397,10 @@ func TestDiffAsset_OrderNumberDiff(t *testing.T) {
 // The sync.sync_configurator_order_info flag is an opt-in escape hatch.
 func TestApplyFieldMapping_SkipsOrderForManuallyAdded(t *testing.T) {
 	tests := []struct {
-		name              string
+		name                 string
 		syncConfiguratorInfo bool
-		wantOrderNumber   string
-		wantDateInCF      bool
+		wantOrderNumber      string
+		wantDateInCF         bool
 	}{
 		{name: "default skip", syncConfiguratorInfo: false, wantOrderNumber: "", wantDateInCF: false},
 		{name: "opt-in sync", syncConfiguratorInfo: true, wantOrderNumber: "CE-2024-12-13-04-11-12-826", wantDateInCF: true},
@@ -445,14 +445,14 @@ func TestApplyFieldMapping_SkipsOrderForManuallyAdded(t *testing.T) {
 // corrected data.
 func TestStripOrderInfoOnUpdate(t *testing.T) {
 	tests := []struct {
-		name           string
-		preserve       bool
-		existingOrder  string
-		existingDate   *snipeit.SnipeTime
-		desiredOrder   string
-		desiredDate    string
-		wantOrder      string
-		wantDateInCF   bool
+		name          string
+		preserve      bool
+		existingOrder string
+		existingDate  *snipeit.SnipeTime
+		desiredOrder  string
+		desiredDate   string
+		wantOrder     string
+		wantDateInCF  bool
 	}{
 		{
 			name:          "preserve off — overwrites everything",
@@ -1334,6 +1334,9 @@ func TestFetchAndSaveAppleCare_SkipsABMWhenAllDevicesCached(t *testing.T) {
 	existing := map[string]*abmclient.CoverageResult{
 		"D1": {Best: &acRecord, All: []abmclient.AppleCareCoverage{acRecord}},
 		"D2": {Best: &acRecord, All: []abmclient.AppleCareCoverage{acRecord}},
+	}
+	if err := writeJSON(tmpDir, "devices.json", devices); err != nil {
+		t.Fatal(err)
 	}
 	if err := writeJSON(tmpDir, "applecare.json", existing); err != nil {
 		t.Fatal(err)

@@ -17,10 +17,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/schollz/progressbar/v3"
-	snipeit "github.com/michellepellon/go-snipeit"
-	"github.com/sirupsen/logrus"
 	"github.com/CampusTech/abm"
+	snipeit "github.com/michellepellon/go-snipeit"
+	"github.com/schollz/progressbar/v3"
+	"github.com/sirupsen/logrus"
 
 	"github.com/CampusTech/axm2snipe/abmclient"
 	"github.com/CampusTech/axm2snipe/config"
@@ -223,13 +223,82 @@ func (e *Engine) fetchAllDevicesPaced(ctx context.Context) ([]abmclient.Device, 
 	}
 
 	devices := make([]abmclient.Device, len(rawDevices))
+	knownSerials := make(map[string]bool, len(rawDevices))
 	for i, od := range rawDevices {
 		devices[i] = abmclient.Device{OrgDevice: od}
 		if name, ok := serverMap[od.ID]; ok {
 			devices[i].AssignedServer = name
 		}
+		knownSerials[strings.ToUpper(deviceSerial(devices[i]))] = true
+	}
+
+	// Released devices disappear from Apple's bulk endpoint. Preserve all
+	// previously recovered records before querying the limited audit history,
+	// preferring the fresh bulk record if a device was later re-added.
+	persistent, perr := e.loadPersistentReleasedDevices()
+	if perr != nil {
+		log.WithError(perr).Warn("Could not load persistent released-device cache")
+	} else {
+		devices = mergeDevicesBySerial(devices, persistent)
+		for _, d := range persistent {
+			knownSerials[normalizeSerial(deviceSerial(d))] = true
+		}
+	}
+
+	recovered := e.recoverReleasedDevices(ctx, knownSerials)
+	devices = mergeDevicesBySerial(devices, recovered)
+	if len(persistent) > 0 || len(recovered) > 0 {
+		if err := e.savePersistentReleasedDevices(mergeDevicesBySerial(persistent, recovered)); err != nil {
+			log.WithError(err).Warn("Could not save persistent released-device cache")
+		}
 	}
 	return devices, nil
+}
+
+// recoverReleasedDevices backfills devices that /v1/orgDevices' bulk list
+// silently excludes because they've been released from the org (confirmed:
+// the list never returns a released device, or a non-null
+// releasedFromOrgDateTime, regardless of fields[orgDevices] -- see
+// ABMConfig.ReleaseLookbackDays). It discovers which serials were released
+// via the audit events log, then fetches each one's full current data via
+// the single-device endpoint, which does return released devices correctly.
+// knownSerials (uppercased) is the set already present in the bulk pull, so
+// a device isn't fetched twice. Failures here are non-fatal -- a device that
+// can't be recovered this way is no worse off than before this feature
+// existed, so a partial failure shouldn't fail the whole download/sync.
+func (e *Engine) recoverReleasedDevices(ctx context.Context, knownSerials map[string]bool) []abmclient.Device {
+	lookback := e.cfg.ABM.ReleaseLookback()
+	log.Debugf("Querying auditEvents for devices released between %s and %s", time.Now().Add(-lookback).UTC().Format(time.RFC3339), time.Now().UTC().Format(time.RFC3339))
+	released, err := e.abm.FetchReleasedDevices(ctx, lookback)
+	if err != nil {
+		log.WithError(err).Warn("Could not fetch released-device audit events; devices released from the org may be missing from this sync")
+		return nil
+	}
+	log.Debugf("Audit log returned %d total DEVICE_REMOVED_FROM_ORG event(s) in the lookback window", len(released))
+
+	var missing []string
+	for serial := range released {
+		if !knownSerials[strings.ToUpper(serial)] {
+			missing = append(missing, serial)
+		}
+	}
+	if len(missing) == 0 {
+		log.Debugf("Audit log shows %d device(s) released within the lookback window, all already accounted for", len(released))
+		return nil
+	}
+	log.Infof("Audit log shows %d released device(s) missing from the bulk device list; fetching them individually", len(missing))
+
+	var recovered []abmclient.Device
+	for _, serial := range missing {
+		device, gerr := e.abm.GetDeviceInfo(ctx, serial)
+		if gerr != nil {
+			log.WithError(gerr).WithField("serial", serial).Warn("Could not fetch released device individually; it will be missing from this sync")
+			continue
+		}
+		recovered = append(recovered, *device)
+	}
+	log.Infof("Recovered %d/%d released device(s) via individual lookups", len(recovered), len(missing))
+	return recovered
 }
 
 // orgDeviceFields is the explicit fields[orgDevices] sparse fieldset we
@@ -1736,10 +1805,10 @@ func (s *appleDBFlexString) UnmarshalJSON(data []byte) error {
 // hardware identifier (e.g. "Mac16,10"). Returns nil on any error.
 func fetchAppleDBInfo(ctx context.Context, productType string) *appleDBDeviceInfo {
 	type appleDBDevice struct {
-		ImageKey string             `json:"imageKey"`
-		Model    []string           `json:"model"`
-		SOC      appleDBFlexString  `json:"soc"`
-		Released appleDBFlexString  `json:"released"`
+		ImageKey string            `json:"imageKey"`
+		Model    []string          `json:"model"`
+		SOC      appleDBFlexString `json:"soc"`
+		Released appleDBFlexString `json:"released"`
 		Colors   []struct {
 			Key string `json:"key"`
 		} `json:"colors"`

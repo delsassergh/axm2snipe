@@ -50,6 +50,32 @@ type ABMConfig struct {
 	// PageSize is the number of devices requested per orgDevices page (1-1000).
 	// Defaults to 100 if unset or zero.
 	PageSize int `yaml:"page_size"`
+
+	// ReleaseLookbackDays controls how far back FetchReleasedDevices scans
+	// /v1/auditEvents (filter[type]=DEVICE_REMOVED_FROM_ORG) for release
+	// events. This exists because /v1/orgDevices (the bulk device list)
+	// excludes released devices entirely, regardless of fields[orgDevices] --
+	// confirmed by inspecting the raw response: the field is present and
+	// null-capable, but no released device (nor a non-null value for it) ever
+	// appears in the list. The audit events endpoint discovers recent releases
+	// and returns the released device's serial number directly (via
+	// eventDataDeviceRemovedFromOrg.serialNumber), which is then used to fetch
+	// full details via the existing single-device GetDevice call (confirmed
+	// working for released devices, unlike the list endpoint). Defaults to
+	// 1095 days (3 years) if unset or zero. Apple doesn't document audit-event
+	// retention and may return less history than requested. Older releases are
+	// seeded once with the import-released CSV command and then retained in the
+	// persistent released-device cache.
+	ReleaseLookbackDays int `yaml:"release_lookback_days"`
+}
+
+// ReleaseLookback returns the configured audit-events lookback window,
+// defaulting to 1095 days (3 years) if unset.
+func (c *ABMConfig) ReleaseLookback() time.Duration {
+	if c.ReleaseLookbackDays <= 0 {
+		return 1095 * 24 * time.Hour
+	}
+	return time.Duration(c.ReleaseLookbackDays) * 24 * time.Hour
 }
 
 // PageDelay returns the configured delay between paginated orgDevices
@@ -76,14 +102,14 @@ func (c *ABMConfig) PageSizeOrDefault() int {
 
 // SnipeITConfig holds Snipe-IT API settings.
 type SnipeITConfig struct {
-	URL                      string `yaml:"url"`
-	APIKey                   string `yaml:"api_key"`
-	ManufacturerID           int    `yaml:"manufacturer_id"`              // Apple manufacturer ID in Snipe
-	DefaultStatusID          int    `yaml:"default_status_id"`            // Status for newly created assets
-	CategoryID               int    `yaml:"category_id"`                  // Default category for new models (fallback)
-	ComputerCategoryID       int    `yaml:"computer_category_id"`         // Category for computer models (Mac)
-	MobileCategoryID         int    `yaml:"mobile_category_id"`           // Category for mobile models (iPhone, iPad)
-	CustomFieldsetID         int    `yaml:"custom_fieldset_id"`           // Optional fieldset for new models
+	URL                string `yaml:"url"`
+	APIKey             string `yaml:"api_key"`
+	ManufacturerID     int    `yaml:"manufacturer_id"`      // Apple manufacturer ID in Snipe
+	DefaultStatusID    int    `yaml:"default_status_id"`    // Status for newly created assets
+	CategoryID         int    `yaml:"category_id"`          // Default category for new models (fallback)
+	ComputerCategoryID int    `yaml:"computer_category_id"` // Category for computer models (Mac)
+	MobileCategoryID   int    `yaml:"mobile_category_id"`   // Category for mobile models (iPhone, iPad)
+	CustomFieldsetID   int    `yaml:"custom_fieldset_id"`   // Optional fieldset for new models
 
 	// ArchivedStatusID is the status label to apply when ABM reports a device
 	// as released from your organization (attrs.ReleasedFromOrgDateTime is
@@ -98,21 +124,21 @@ type SnipeITConfig struct {
 
 // SyncConfig holds sync behavior settings.
 type SyncConfig struct {
-	DryRun           bool              `yaml:"dry_run"`
-	Force            bool              `yaml:"force"`             // ignore timestamps, always update
-	RateLimit        bool              `yaml:"rate_limit"`        // enable rate limiting
-	UpdateOnly       bool              `yaml:"update_only"`       // only update existing assets, never create new ones
-	UseCache         bool              `yaml:"use_cache"`         // use cached data instead of fetching from ABM API
-	CacheDir         string            `yaml:"cache_dir"`         // directory for cached API responses (default ".cache")
-	ProductFamilies  []string          `yaml:"product_families"`  // filter by product family (Mac, iPhone, iPad, etc.)
-	SetName          bool              `yaml:"set_name"`          // set asset name on create (default false)
-	FieldMapping     map[string]string `yaml:"field_mapping"`     // snipe field -> ABM attribute mapping
-	MDMOnly          bool              `yaml:"mdm_only"`          // only sync devices assigned to an MDM server
-	MDMOnlyCache     bool              `yaml:"mdm_only_cache"`    // also exclude non-MDM devices from cache (requires mdm_only)
-	SupplierMapping  map[string]int    `yaml:"supplier_mapping"`  // ABM purchaseSourceId or purchaseSourceType -> snipe supplier ID
-	ModelImages        bool              `yaml:"model_images"`         // fetch device images from appledb.dev for newly created models
-	PreserveOrderInfoOnUpdate bool       `yaml:"preserve_order_info_on_update"`  // never overwrite existing purchase_date / order_number on update
-	SyncConfiguratorOrderInfo bool       `yaml:"sync_configurator_order_info"`   // sync order_date / order_number even for MANUALLY_ADDED devices (default: skip, since ABM's values for these are Configurator enrollment metadata, not real purchase data)
+	DryRun                    bool              `yaml:"dry_run"`
+	Force                     bool              `yaml:"force"`                         // ignore timestamps, always update
+	RateLimit                 bool              `yaml:"rate_limit"`                    // enable rate limiting
+	UpdateOnly                bool              `yaml:"update_only"`                   // only update existing assets, never create new ones
+	UseCache                  bool              `yaml:"use_cache"`                     // use cached data instead of fetching from ABM API
+	CacheDir                  string            `yaml:"cache_dir"`                     // directory for cached API responses (default ".cache")
+	ProductFamilies           []string          `yaml:"product_families"`              // filter by product family (Mac, iPhone, iPad, etc.)
+	SetName                   bool              `yaml:"set_name"`                      // set asset name on create (default false)
+	FieldMapping              map[string]string `yaml:"field_mapping"`                 // snipe field -> ABM attribute mapping
+	MDMOnly                   bool              `yaml:"mdm_only"`                      // only sync devices assigned to an MDM server
+	MDMOnlyCache              bool              `yaml:"mdm_only_cache"`                // also exclude non-MDM devices from cache (requires mdm_only)
+	SupplierMapping           map[string]int    `yaml:"supplier_mapping"`              // ABM purchaseSourceId or purchaseSourceType -> snipe supplier ID
+	ModelImages               bool              `yaml:"model_images"`                  // fetch device images from appledb.dev for newly created models
+	PreserveOrderInfoOnUpdate bool              `yaml:"preserve_order_info_on_update"` // never overwrite existing purchase_date / order_number on update
+	SyncConfiguratorOrderInfo bool              `yaml:"sync_configurator_order_info"`  // sync order_date / order_number even for MANUALLY_ADDED devices (default: skip, since ABM's values for these are Configurator enrollment metadata, not real purchase data)
 }
 
 // Load reads configuration from a YAML file and applies environment variable overrides.

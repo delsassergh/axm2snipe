@@ -196,12 +196,10 @@ func (c *Client) GetAllDevices(ctx context.Context) ([]Device, int, error) {
 
 // GetDevice fetches a single device by serial number and resolves its assigned MDM server name.
 func (c *Client) GetDevice(ctx context.Context, serial string) (*Device, error) {
-	resp, err := c.abm.GetOrgDevice(ctx, serial, nil)
+	device, err := c.GetDeviceInfo(ctx, serial)
 	if err != nil {
-		return nil, fmt.Errorf("fetching device %s: %w", serial, err)
+		return nil, err
 	}
-
-	device := &Device{OrgDevice: resp.Data}
 
 	// Resolve assigned MDM server name
 	serverResp, err := c.abm.GetOrgDeviceAssignedServer(ctx, serial, nil)
@@ -212,6 +210,17 @@ func (c *Client) GetDevice(ctx context.Context, serial string) (*Device, error) 
 	}
 
 	return device, nil
+}
+
+// GetDeviceInfo fetches a single device without resolving its assigned MDM
+// server. Released devices are necessarily unassigned, so historical import
+// and audit recovery use this method to avoid an extra API request per device.
+func (c *Client) GetDeviceInfo(ctx context.Context, serial string) (*Device, error) {
+	resp, err := c.abm.GetOrgDevice(ctx, serial, nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetching device %s: %w", serial, err)
+	}
+	return &Device{OrgDevice: resp.Data}, nil
 }
 
 // PurchaseSource represents a unique ABM purchase source.
@@ -253,8 +262,8 @@ func (c *Client) GetAllPurchaseSources(ctx context.Context) ([]PurchaseSource, e
 // CoverageResult holds both the "winning" AppleCare record and the full list
 // of all coverage records for a device.
 type CoverageResult struct {
-	Best *AppleCareCoverage   // selected by priority rules (may be nil)
-	All  []AppleCareCoverage  // all records, including Limited Warranty
+	Best *AppleCareCoverage  // selected by priority rules (may be nil)
+	All  []AppleCareCoverage // all records, including Limited Warranty
 }
 
 // GetAppleCareCoverage fetches AppleCare coverage for a device.

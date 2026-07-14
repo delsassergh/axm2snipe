@@ -1,11 +1,16 @@
 # Binary
 axm2snipe
+axm2snipe-test
 
 # Config with secrets
 settings.yaml
 
 # ABM cache directory
 .cache/
+
+# Local ABM exports and run logs
+All_ABM_Assets*.csv
+*.log
 
 # Private keys
 *.pem
