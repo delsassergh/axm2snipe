@@ -188,6 +188,24 @@ func (c *Client) UpdateModelImage(ctx context.Context, model snipeit.Model, imag
 	return &resp.Payload, nil
 }
 
+// UpdateModelFieldset assigns an existing model to a custom fieldset while
+// preserving the model's other writable attributes.
+func (c *Client) UpdateModelFieldset(ctx context.Context, model snipeit.Model, fieldsetID int) (*snipeit.Model, error) {
+	if c.DryRun {
+		return nil, ErrDryRun
+	}
+
+	model.FieldsetID = fieldsetID
+	resp, _, err := c.Models.UpdateContext(ctx, model.ID, model)
+	if err != nil {
+		return nil, fmt.Errorf("updating model fieldset: %w", err)
+	}
+	if resp.Status != "success" {
+		return nil, fmt.Errorf("updating model fieldset failed: %s", resp.Message)
+	}
+	return &resp.Payload, nil
+}
+
 // ListAllAssets returns all hardware assets from Snipe-IT, handling
 // pagination. Used to build an in-memory serial lookup once per sync run
 // instead of calling GetAssetBySerial once per device — see

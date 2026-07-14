@@ -49,6 +49,14 @@ func TestCreateModel_DryRun(t *testing.T) {
 	}
 }
 
+func TestUpdateModelFieldset_DryRun(t *testing.T) {
+	c := &Client{DryRun: true}
+	_, err := c.UpdateModelFieldset(context.Background(), snipeit.Model{}, 2)
+	if !errors.Is(err, ErrDryRun) {
+		t.Errorf("expected ErrDryRun, got %v", err)
+	}
+}
+
 func TestCreateSupplier_DryRun(t *testing.T) {
 	c := &Client{DryRun: true}
 	_, err := c.CreateSupplier(context.Background(), "Test Supplier")
@@ -246,6 +254,40 @@ func TestListAllModels_Pagination(t *testing.T) {
 	}
 	if callCount != 2 {
 		t.Errorf("expected 2 API calls for pagination, got %d", callCount)
+	}
+}
+
+func TestUpdateModelFieldset_PreservesModel(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/models/54" {
+			http.NotFound(w, r)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["name"] != "MacBook Pro" || body["category_id"] != float64(3) || body["manufacturer_id"] != float64(1) || body["fieldset_id"] != float64(2) {
+			t.Fatalf("unexpected update payload: %#v", body)
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":  "success",
+			"payload": map[string]any{"id": 54, "name": "MacBook Pro", "fieldset_id": 2},
+		})
+	})
+
+	c := newTestClient(t, handler)
+	model := snipeit.Model{
+		CommonFields: snipeit.CommonFields{ID: 54, Name: "MacBook Pro"},
+		Category:     snipeit.Category{CommonFields: snipeit.CommonFields{ID: 3}},
+		Manufacturer: snipeit.Manufacturer{CommonFields: snipeit.CommonFields{ID: 1}},
+	}
+	updated, err := c.UpdateModelFieldset(context.Background(), model, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.FieldsetID != 2 {
+		t.Fatalf("expected fieldset 2, got %d", updated.FieldsetID)
 	}
 }
 

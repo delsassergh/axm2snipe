@@ -138,6 +138,10 @@ axm2snipe sync --force -v
 # Auto-create AXM custom fields in Snipe-IT and save mappings to config
 axm2snipe setup -v
 
+# Assign selected existing models to the configured custom fieldset. This is
+# useful when older models predate setup and therefore reject AXM fields.
+axm2snipe assign-fieldset --model-ids 54,55,62 -v
+
 # Debug logging
 axm2snipe sync -d
 

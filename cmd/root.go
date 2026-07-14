@@ -241,9 +241,10 @@ func Execute() {
 	requestCmd := NewRequestCmd()
 	backfillImagesCmd := NewBackfillImagesCmd()
 	importReleasedCmd := NewImportReleasedCmd()
+	assignFieldsetCmd := NewAssignFieldsetCmd()
 
 	// --dry-run: sync, setup, backfill-images
-	for _, cmd := range []*cobra.Command{syncCmd, setupCmd, backfillImagesCmd} {
+	for _, cmd := range []*cobra.Command{syncCmd, setupCmd, backfillImagesCmd, assignFieldsetCmd} {
 		cmd.Flags().Bool("dry-run", false, "Simulate without making changes")
 	}
 
@@ -260,6 +261,7 @@ func Execute() {
 	rootCmd.AddCommand(requestCmd)
 	rootCmd.AddCommand(backfillImagesCmd)
 	rootCmd.AddCommand(importReleasedCmd)
+	rootCmd.AddCommand(assignFieldsetCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
