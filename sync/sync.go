@@ -1452,6 +1452,8 @@ func (e *Engine) applyFieldMapping(ctx context.Context, asset *snipeit.Asset, de
 			if !attrs.ReleasedFromOrgDateTime.IsZero() {
 				value = attrs.ReleasedFromOrgDateTime.Format("2006-01-02")
 			}
+		case "is_released", "released":
+			value = strconv.FormatBool(!attrs.ReleasedFromOrgDateTime.IsZero())
 
 		// --- appledb.dev metadata (looked up by ProductType, cached per run) ---
 		// These are not ABM fields — they come from the same appledb.dev

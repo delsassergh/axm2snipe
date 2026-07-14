@@ -282,6 +282,7 @@ All field mappings are configured in `settings.yaml` under `sync.field_mapping`.
 | `eid` | eSIM EID |
 | `added_to_org` | Date added to organization |
 | `released_from_org` | Date released from organization. Also drives the asset's Snipe-IT *status* (not just this field) if `snipe_it.archived_status_id` is configured — see Config Options above. |
+| `is_released` | Boolean (`true`/`false`) indicating whether the device has a release date; useful for filtering assets. |
 | `assigned_server` | Assigned MDM server name |
 
 **AppleDB.dev metadata** (looked up by `product_type`, cached per run):

@@ -133,6 +133,7 @@ sync:
   #   product_family, product_type, order_number, order_date,
   #   purchase_source, purchase_source_id, status, imei, meid, wifi_mac,
   #   bluetooth_mac, ethernet_mac, eid, added_to_org, released_from_org,
+  #   is_released,       -- true when released_from_org has a date, else false
   #   assigned_server
   #
   # AppleDB.dev metadata (looked up by product_type, cached per run --

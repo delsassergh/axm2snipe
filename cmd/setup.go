@@ -104,6 +104,7 @@ func runSetup(cmd *cobra.Command, args []string) error {
 		{Name: "AXM: Purchase Source", Element: "radio", Format: "ANY", HelpText: "How the device was acquired in ABM/ASM", FieldValues: "Apple\nReseller\nManually Added"},
 		{Name: "AXM: Purchase Source ID", Element: "text", Format: "ANY", HelpText: "Apple Customer Number (for APPLE) or Reseller Number (for RESELLER)"},
 		{Name: "AXM: Released from Org", Element: "text", Format: "DATE", HelpText: "Date device was released from ABM/ASM organization"},
+		{Name: "AXM: Released?", Element: "listbox", Format: "BOOLEAN", HelpText: "Whether the device has been released from the ABM/ASM organization", FieldValues: "true\nfalse"},
 		{Name: "AXM: Wi-Fi MAC Address", Element: "text", Format: "MAC", HelpText: "Wi-Fi MAC address (colon-separated)"},
 	}
 
@@ -117,11 +118,12 @@ func runSetup(cmd *cobra.Command, args []string) error {
 	abmAttr := map[string]string{
 		"AXM: Added to Org":           "added_to_org",
 		"AXM: Released from Org":      "released_from_org",
+		"AXM: Released?":              "is_released",
 		"AXM: MDM Assigned?":          "status",
 		"AXM: AppleCare Status":       "applecare_status",
-		"AXM: Apple Model Number":    "apple_model_number",
-		"AXM: Chip":                  "chip",
-		"AXM: Model Year":            "model_year",
+		"AXM: Apple Model Number":     "apple_model_number",
+		"AXM: Chip":                   "chip",
+		"AXM: Model Year":             "model_year",
 		"AXM: AppleCare Description":  "applecare_description",
 		"AXM: AppleCare Start Date":   "applecare_start",
 		"AXM: AppleCare Renewable":    "applecare_renewable",

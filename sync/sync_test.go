@@ -568,6 +568,18 @@ func TestApplyFieldMapping_PurchaseSourceID(t *testing.T) {
 	}
 }
 
+func TestApplyFieldMapping_IsReleasedFalse(t *testing.T) {
+	e := &Engine{cfg: &config.Config{Sync: config.SyncConfig{FieldMapping: map[string]string{
+		"_snipeit_is_released_1": "is_released",
+	}}}}
+	device := abmclient.Device{OrgDevice: abm.OrgDevice{Attributes: &abm.OrgDeviceAttributes{SerialNumber: "ACTIVE"}}}
+	asset := snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: make(map[string]string)}}
+	e.applyFieldMapping(context.Background(), &asset, device, nil)
+	if got := asset.CustomFields["_snipeit_is_released_1"]; got != "false" {
+		t.Fatalf("is_released = %q, want false", got)
+	}
+}
+
 func TestDiffAsset_WarrantyMonthsDiff(t *testing.T) {
 	e := &Engine{cfg: &config.Config{}}
 	desired := &snipeit.Asset{
@@ -594,30 +606,33 @@ func TestDiffAsset_WarrantyMonthsDiff(t *testing.T) {
 func TestApplyFieldMapping(t *testing.T) {
 	orderDate := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
 	addedDate := time.Date(2024, 7, 1, 12, 0, 0, 0, time.UTC)
+	releasedDate := time.Date(2025, 7, 2, 12, 0, 0, 0, time.UTC)
 	acEnd := time.Date(2027, 6, 15, 0, 0, 0, 0, time.UTC)
 	acStart := time.Date(2024, 6, 15, 0, 0, 0, 0, time.UTC)
 
 	e := &Engine{cfg: &config.Config{
 		Sync: config.SyncConfig{
 			FieldMapping: map[string]string{
-				"_snipeit_color_1":   "color",
-				"_snipeit_storage_2": "device_capacity",
-				"_snipeit_mac_3":     "wifi_mac",
-				"_snipeit_status_4":  "applecare_status",
-				"_snipeit_start_5":   "applecare_start",
-				"_snipeit_end_6":     "applecare_end",
-				"_snipeit_pay_7":     "applecare_payment_type",
-				"_snipeit_renew_8":   "applecare_renewable",
-				"_snipeit_server_9":  "assigned_server",
-				"_snipeit_added_10":  "added_to_org",
-				"order_number":       "order_number",
-				"purchase_date":      "order_date",
-				"_snipeit_model_11":  "device_model",
-				"_snipeit_part_12":   "part_number",
-				"_snipeit_family_13": "product_family",
-				"_snipeit_type_14":   "product_type",
-				"_snipeit_src_15":    "purchase_source",
-				"_snipeit_stat_16":   "status",
+				"_snipeit_color_1":        "color",
+				"_snipeit_storage_2":      "device_capacity",
+				"_snipeit_mac_3":          "wifi_mac",
+				"_snipeit_status_4":       "applecare_status",
+				"_snipeit_start_5":        "applecare_start",
+				"_snipeit_end_6":          "applecare_end",
+				"_snipeit_pay_7":          "applecare_payment_type",
+				"_snipeit_renew_8":        "applecare_renewable",
+				"_snipeit_server_9":       "assigned_server",
+				"_snipeit_added_10":       "added_to_org",
+				"_snipeit_released_17":    "released_from_org",
+				"_snipeit_is_released_18": "is_released",
+				"order_number":            "order_number",
+				"purchase_date":           "order_date",
+				"_snipeit_model_11":       "device_model",
+				"_snipeit_part_12":        "part_number",
+				"_snipeit_family_13":      "product_family",
+				"_snipeit_type_14":        "product_type",
+				"_snipeit_src_15":         "purchase_source",
+				"_snipeit_stat_16":        "status",
 			},
 		},
 	}}
@@ -625,18 +640,19 @@ func TestApplyFieldMapping(t *testing.T) {
 	device := abmclient.Device{
 		OrgDevice: abm.OrgDevice{
 			Attributes: &abm.OrgDeviceAttributes{
-				Color:              "SPACE GRAY",
-				DeviceCapacity:     "512GB",
-				WifiMacAddress:     abm.FlexStringSlice{"AABBCCDDEEFF"},
-				OrderNumber:        "CDW/1TESTORD/002",
-				OrderDateTime:      orderDate,
-				AddedToOrgDateTime: addedDate,
-				DeviceModel:        "MacBook Pro (16-inch, 2024)",
-				PartNumber:         "TEST1LL/A",
-				ProductFamily:      abm.OrgDeviceAttributesProductFamily("Mac"),
-				ProductType:        "Mac16,1",
-				PurchaseSourceType: abm.OrgDeviceAttributesPurchaseSourceType("RESELLER"),
-				Status:             abm.OrgDeviceAttributesStatus("ASSIGNED"),
+				Color:                   "SPACE GRAY",
+				DeviceCapacity:          "512GB",
+				WifiMacAddress:          abm.FlexStringSlice{"AABBCCDDEEFF"},
+				OrderNumber:             "CDW/1TESTORD/002",
+				OrderDateTime:           orderDate,
+				AddedToOrgDateTime:      addedDate,
+				ReleasedFromOrgDateTime: releasedDate,
+				DeviceModel:             "MacBook Pro (16-inch, 2024)",
+				PartNumber:              "TEST1LL/A",
+				ProductFamily:           abm.OrgDeviceAttributesProductFamily("Mac"),
+				ProductType:             "Mac16,1",
+				PurchaseSourceType:      abm.OrgDeviceAttributesPurchaseSourceType("RESELLER"),
+				Status:                  abm.OrgDeviceAttributesStatus("ASSIGNED"),
 			},
 		},
 		AssignedServer: "TestMDM",
@@ -660,22 +676,24 @@ func TestApplyFieldMapping(t *testing.T) {
 	e.applyFieldMapping(context.Background(), &asset, device, coverage)
 
 	checks := map[string]string{
-		"_snipeit_color_1":   "Space Gray",
-		"_snipeit_storage_2": "512",
-		"_snipeit_mac_3":     "AA:BB:CC:DD:EE:FF",
-		"_snipeit_status_4":  "Active",
-		"_snipeit_start_5":   "2024-06-15",
-		"_snipeit_end_6":     "2027-06-15",
-		"_snipeit_pay_7":     "Paid Up Front",
-		"_snipeit_renew_8":   "true",
-		"_snipeit_server_9":  "TestMDM",
-		"_snipeit_added_10":  "2024-07-01",
-		"_snipeit_model_11":  "MacBook Pro (16-inch, 2024)",
-		"_snipeit_part_12":   "TEST1LL/A",
-		"_snipeit_family_13": "Mac",
-		"_snipeit_type_14":   "Mac16,1",
-		"_snipeit_src_15":    "Reseller",
-		"_snipeit_stat_16":   "true",
+		"_snipeit_color_1":        "Space Gray",
+		"_snipeit_storage_2":      "512",
+		"_snipeit_mac_3":          "AA:BB:CC:DD:EE:FF",
+		"_snipeit_status_4":       "Active",
+		"_snipeit_start_5":        "2024-06-15",
+		"_snipeit_end_6":          "2027-06-15",
+		"_snipeit_pay_7":          "Paid Up Front",
+		"_snipeit_renew_8":        "true",
+		"_snipeit_server_9":       "TestMDM",
+		"_snipeit_added_10":       "2024-07-01",
+		"_snipeit_released_17":    "2025-07-02",
+		"_snipeit_is_released_18": "true",
+		"_snipeit_model_11":       "MacBook Pro (16-inch, 2024)",
+		"_snipeit_part_12":        "TEST1LL/A",
+		"_snipeit_family_13":      "Mac",
+		"_snipeit_type_14":        "Mac16,1",
+		"_snipeit_src_15":         "Reseller",
+		"_snipeit_stat_16":        "true",
 	}
 
 	for field, want := range checks {
