@@ -1,0 +1,12 @@
+SHELL=/bin/bash
+MAILTO=you@example.com
+
+# Kandji: replace the placeholder with the Kandji sync command installed on
+# this host. The shared lock prevents concurrent writes to Snipe-IT.
+5 * * * * /usr/bin/flock -n /tmp/snipe-write.lock YOUR_KANDJI_SYNC_COMMAND
+
+# Routine ABM device + incremental AppleCare refresh, Monday through Saturday.
+20 2 * * 1-6 /opt/axm2snipe/scripts/cached-sync.sh
+
+# Sunday replaces the routine job with a full AppleCare refresh.
+20 1 * * 0 /opt/axm2snipe/scripts/cached-sync.sh --applecare-full

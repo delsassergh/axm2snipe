@@ -168,6 +168,102 @@ axm2snipe access-token
 axm2snipe request https://mdmenrollment.apple.com/server/devices
 ```
 
+## Scheduled operation
+
+For routine operation, keep the download/cache model. The included
+[`scripts/cached-sync.sh`](scripts/cached-sync.sh) wrapper:
+
+- refreshes devices and AppleCare in order;
+- syncs the last known-good cache even if a refresh fails;
+- reports a stale or missing device cache (48-hour threshold by default);
+- prevents nightly and weekly ABM jobs from overlapping; and
+- takes a separate shared lock only during Snipe-IT writes, allowing a long
+  weekly AppleCare download to coexist with hourly MDM downloads safely.
+
+The wrapper exits nonzero after any failed refresh even when its cached sync
+succeeds. With cron `MAILTO` configured, that produces an alert while keeping
+Snipe-IT reconciled from the most recent completed snapshot. Full command
+output is appended to `cron-sync.log` by default.
+
+Routine nightly run:
+
+```bash
+./scripts/cached-sync.sh
+```
+
+Weekly full AppleCare refresh:
+
+```bash
+./scripts/cached-sync.sh --applecare-full
+```
+
+An editable version is included at
+[`deploy/axm2snipe.crontab.example`](deploy/axm2snipe.crontab.example).
+Assuming the runtime is installed at `/opt/axm2snipe`, use:
+
+```cron
+SHELL=/bin/bash
+MAILTO=you@example.com
+
+# Kandji: replace the final placeholder with the existing Kandji sync command.
+# It must use the same lock so Kandji and axm2snipe never write Snipe together.
+5 * * * * /usr/bin/flock -n /tmp/snipe-write.lock YOUR_KANDJI_SYNC_COMMAND
+
+# Routine ABM refresh and cached sync, Monday through Saturday.
+20 2 * * 1-6 /opt/axm2snipe/scripts/cached-sync.sh
+
+# Sunday replaces the routine job with a full AppleCare refresh.
+20 1 * * 0 /opt/axm2snipe/scripts/cached-sync.sh --applecare-full
+```
+
+Do not redirect the wrapper's stderr in cron if `MAILTO` is the desired alert
+mechanism. Successful runs are quiet; failures print a concise message while
+detailed output remains in `cron-sync.log`. Override paths, locks, cache-age
+threshold, or the Snipe lock wait through the environment variables shown by
+`scripts/cached-sync.sh --help`.
+
+### Moving to a cron host
+
+Build credential-free Linux runtime archives for both common server
+architectures:
+
+```bash
+./scripts/build-runtime-packages.sh
+```
+
+This creates `dist/axm2snipe-linux-amd64.tar.gz` and
+`dist/axm2snipe-linux-arm64.tar.gz`, plus SHA-256 checksum files. Each archive
+contains the binary, cached-sync wrapper, crontab example, README, and example
+configuration. It deliberately excludes `settings.yaml`, private keys, cache
+data, logs, CSV exports, and Git history.
+
+On the target Linux host, select the archive matching `uname -m` (`x86_64` is
+`amd64`; `aarch64` is `arm64`) and extract it:
+
+```bash
+sudo tar -xzf axm2snipe-linux-amd64.tar.gz -C /opt
+sudo chown -R YOUR_SERVICE_USER:YOUR_SERVICE_GROUP /opt/axm2snipe
+```
+
+Transfer these separately using a secure channel:
+
+- `settings.yaml` with mode `0600`;
+- the private-key file if the configuration references one; and
+- the current `.cache/` directory, especially `released-devices.json`, so the
+  target retains the completed historical true-up and AppleCare cache.
+
+Before installing the crontab, run:
+
+```bash
+cd /opt/axm2snipe
+./axm2snipe test
+./scripts/cached-sync.sh
+```
+
+Then copy `deploy/axm2snipe.crontab.example`, replace `MAILTO`, the Kandji
+placeholder, service paths if needed, and install it with `crontab -e` under
+the service account. Cron uses the target host's local timezone.
+
 ### Commands
 
 | Command | Description |
