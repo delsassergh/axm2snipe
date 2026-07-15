@@ -1179,14 +1179,32 @@ func TestLookupExistingAsset_UsesPreloadedIndex(t *testing.T) {
 	}
 }
 
-func TestLookupExistingAsset_UnknownSerialReturnsEmpty(t *testing.T) {
-	e := &Engine{assetsBySerial: map[string][]snipeit.Asset{}}
-	resp, err := e.lookupExistingAsset(context.Background(), "NOPE")
+func TestLookupExistingAsset_IndexMissChecksLiveAPI(t *testing.T) {
+	called := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		resp := map[string]any{
+			"total": 1,
+			"rows": []map[string]any{
+				{"id": 77, "name": "Archived Asset", "serial": "ARCHIVED1"},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	snipeClient, err := snipe.NewClient(srv.URL, "test-key", false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.Total != 0 || len(resp.Rows) != 0 {
-		t.Errorf("expected empty result for unknown serial, got %+v", resp)
+	e := &Engine{snipe: snipeClient, assetsBySerial: map[string][]snipeit.Asset{}}
+	resp, err := e.lookupExistingAsset(context.Background(), "ARCHIVED1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || resp.Total != 1 || len(resp.Rows) != 1 || resp.Rows[0].ID != 77 {
+		t.Errorf("expected archived asset from live fallback, got %+v", resp)
 	}
 }
 

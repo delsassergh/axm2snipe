@@ -844,14 +844,17 @@ func (e *Engine) loadAssets(ctx context.Context) error {
 
 // lookupExistingAsset resolves a device's serial to its existing Snipe-IT
 // asset(s). When loadAssets has populated the in-memory index (the normal
-// Run path), it's used directly with no API call. Otherwise (e.g.
-// RunSingle, which only ever processes one device and would gain nothing
-// from preloading the entire asset table) this falls back to a live
-// snipe.Client.GetAssetBySerial call.
+// Run path), known serials are resolved without an API call. An index miss
+// is verified with the byserial endpoint before the caller creates anything:
+// some Snipe-IT configurations omit archived assets from the bulk hardware
+// list even though byserial can still find them. RunSingle also uses the live
+// lookup because it does not preload the asset table.
 func (e *Engine) lookupExistingAsset(ctx context.Context, serial string) (*snipeit.AssetsResponse, error) {
 	if e.assetsBySerial != nil {
 		rows := e.assetsBySerial[strings.ToLower(serial)]
-		return &snipeit.AssetsResponse{Response: snipeit.Response{Total: len(rows)}, Rows: rows}, nil
+		if len(rows) > 0 {
+			return &snipeit.AssetsResponse{Response: snipeit.Response{Total: len(rows)}, Rows: rows}, nil
+		}
 	}
 	return e.snipe.GetAssetBySerial(ctx, serial)
 }

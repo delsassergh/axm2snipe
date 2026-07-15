@@ -17,7 +17,7 @@ Inspired by [jamf2snipe](https://github.com/grokability/jamf2snipe), but connect
 - Optional human-readable model metadata from appledb.dev (Apple regulatory model number, chip/SoC, release year) as asset-level custom fields — Snipe-IT has no per-model custom fields, so these fill in where the internal hardware identifier (e.g. `Mac16,10`) isn't enough to tell models apart at a glance
 - Automatically creates Snipe-IT suppliers from ABM/ASM purchase sources
 - Fetches AppleCare coverage details for each device
-- Matches existing assets by serial number (create or update), resolved from a one-time preloaded index rather than a live API call per device, to stay well under Snipe-IT's own API rate limit on large syncs
+- Matches existing assets by serial number (create or update), resolved from a one-time preloaded index to stay well under Snipe-IT's own API rate limit on large syncs; index misses are verified by exact serial lookup so archived assets omitted from bulk listings are never mistaken for new assets
 - Sync a single device by serial number with `sync --serial`
 - Timestamp-based change detection to skip unchanged records
 - Fully configurable field mapping between ABM/AppleCare attributes and Snipe-IT fields
