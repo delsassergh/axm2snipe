@@ -109,6 +109,9 @@ slack:
 	if cfg.Sync.SupplierMapping["APPLE"] != 1 {
 		t.Errorf("SupplierMapping APPLE = %d", cfg.Sync.SupplierMapping["APPLE"])
 	}
+	if !cfg.Sync.WarrantyNotes {
+		t.Error("WarrantyNotes should default to true when omitted")
+	}
 
 	// Slack
 	if !cfg.Slack.Enabled {
@@ -116,6 +119,24 @@ slack:
 	}
 	if cfg.Slack.WebhookURL != "https://hooks.slack.com/test" {
 		t.Errorf("Slack.WebhookURL = %q", cfg.Slack.WebhookURL)
+	}
+}
+
+func TestLoad_WarrantyNotesDisabled(t *testing.T) {
+	restore := clearAXMEnv(t)
+	defer restore()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.yaml")
+	if err := os.WriteFile(path, []byte("sync:\n  warranty_notes: false\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Sync.WarrantyNotes {
+		t.Error("WarrantyNotes should honor an explicit false value")
 	}
 }
 
@@ -296,7 +317,7 @@ func TestMergeFieldMapping(t *testing.T) {
 	}
 
 	newMappings := map[string]string{
-		"_snipeit_color_1":  "color",    // existing — should not duplicate
+		"_snipeit_color_1":  "color", // existing — should not duplicate
 		"_snipeit_status_2": "applecare_status",
 	}
 

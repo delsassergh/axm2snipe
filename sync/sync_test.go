@@ -293,7 +293,7 @@ func TestDiffAsset_NotesHTMLEncoding(t *testing.T) {
 		EndDateTime:   time.Date(2025, 9, 28, 0, 0, 0, 0, time.UTC),
 	}
 	base := &snipeit.Asset{}
-	applyWarrantyNotes(base, &abmclient.CoverageResult{Best: &ac, All: []abmclient.AppleCareCoverage{ac}})
+	applyWarrantyNotes(base, &abmclient.CoverageResult{Best: &ac, All: []abmclient.AppleCareCoverage{ac}}, true)
 	notes := base.Notes
 
 	desired := &snipeit.Asset{
@@ -1447,7 +1447,7 @@ func TestApplyWarrantyNotes_PreservesManualNotes(t *testing.T) {
 
 	// First apply: no existing notes
 	asset := &snipeit.Asset{}
-	applyWarrantyNotes(asset, coverage)
+	applyWarrantyNotes(asset, coverage, true)
 	if !strings.Contains(asset.Notes, warrantyNotesStart) {
 		t.Error("expected warranty sentinel start in notes")
 	}
@@ -1457,7 +1457,7 @@ func TestApplyWarrantyNotes_PreservesManualNotes(t *testing.T) {
 
 	// Second apply: manual notes before and after existing sentinel block
 	asset.Notes = "Manual note before.\n\n" + asset.Notes + "\n\nManual note after."
-	applyWarrantyNotes(asset, coverage)
+	applyWarrantyNotes(asset, coverage, true)
 
 	if !strings.HasPrefix(asset.Notes, "Manual note before.") {
 		t.Errorf("manual prefix lost; notes = %q", asset.Notes)
@@ -1479,11 +1479,11 @@ func TestApplyWarrantyNotes_ReplaceBlockAtStart(t *testing.T) {
 	coverage := &abmclient.CoverageResult{Best: &ac, All: []abmclient.AppleCareCoverage{ac}}
 
 	asset := &snipeit.Asset{}
-	applyWarrantyNotes(asset, coverage)
+	applyWarrantyNotes(asset, coverage, true)
 	firstNotes := asset.Notes
 
 	// Simulate a second sync: block already present, nothing before it.
-	applyWarrantyNotes(asset, coverage)
+	applyWarrantyNotes(asset, coverage, true)
 
 	if asset.Notes != firstNotes {
 		t.Errorf("re-apply changed notes\ngot:  %q\nwant: %q", asset.Notes, firstNotes)
@@ -1499,7 +1499,7 @@ func TestApplyWarrantyNotes_NilCoverageRemovesBlock(t *testing.T) {
 	asset := &snipeit.Asset{}
 	asset.Notes = existing
 
-	applyWarrantyNotes(asset, nil)
+	applyWarrantyNotes(asset, nil, true)
 
 	if strings.Contains(asset.Notes, warrantyNotesStart) {
 		t.Errorf("sentinel block should be removed when coverage is nil; notes = %q", asset.Notes)
@@ -1515,9 +1515,48 @@ func TestApplyWarrantyNotes_NilCoverageRemovesBlock(t *testing.T) {
 func TestApplyWarrantyNotes_NilCoverageNoBlock(t *testing.T) {
 	asset := &snipeit.Asset{}
 	asset.Notes = "Just a manual note."
-	applyWarrantyNotes(asset, nil)
+	applyWarrantyNotes(asset, nil, true)
 	if asset.Notes != "Just a manual note." {
 		t.Errorf("notes should be unchanged; got %q", asset.Notes)
+	}
+}
+
+func TestApplyWarrantyNotes_DisabledRemovesOnlyManagedBlock(t *testing.T) {
+	existing := "Manual before.\n\n" + warrantyNotesStart + "\nold warranty data\n" + warrantyNotesEnd + "\n\nManual after."
+	asset := &snipeit.Asset{CommonFields: snipeit.CommonFields{Notes: existing}}
+	coverage := &abmclient.CoverageResult{All: []abmclient.AppleCareCoverage{{Status: "ACTIVE"}}}
+
+	applyWarrantyNotes(asset, coverage, false)
+
+	if strings.Contains(asset.Notes, warrantyNotesStart) || strings.Contains(asset.Notes, "old warranty data") {
+		t.Errorf("managed warranty block was not removed; notes = %q", asset.Notes)
+	}
+	if asset.Notes != "Manual before.\n\nManual after." {
+		t.Errorf("manual notes changed; notes = %q", asset.Notes)
+	}
+}
+
+func TestDiffAsset_CanClearManagedNotes(t *testing.T) {
+	e := &Engine{cfg: &config.Config{}}
+	desired := &snipeit.Asset{CommonFields: snipeit.CommonFields{CustomFields: map[string]string{}}}
+	existing := &snipeit.Asset{CommonFields: snipeit.CommonFields{
+		Notes:        warrantyNotesStart + "\nold warranty data\n" + warrantyNotesEnd,
+		CustomFields: map[string]string{},
+	}}
+
+	diff := e.diffAsset(desired, existing)
+	if diff == nil {
+		t.Fatal("diffAsset should return a diff when managed notes need to be cleared")
+	}
+	if diff.Notes != "" {
+		t.Errorf("diff.Notes = %q, want empty", diff.Notes)
+	}
+	payload, err := json.Marshal(diff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), `"notes":""`) {
+		t.Errorf("clearing payload does not contain an explicit empty notes value: %s", payload)
 	}
 }
 

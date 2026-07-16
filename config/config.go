@@ -137,6 +137,7 @@ type SyncConfig struct {
 	MDMOnlyCache              bool              `yaml:"mdm_only_cache"`                // also exclude non-MDM devices from cache (requires mdm_only)
 	SupplierMapping           map[string]int    `yaml:"supplier_mapping"`              // ABM purchaseSourceId or purchaseSourceType -> snipe supplier ID
 	ModelImages               bool              `yaml:"model_images"`                  // fetch device images from appledb.dev for newly created models
+	WarrantyNotes             bool              `yaml:"warranty_notes"`                // store all AppleCare records in an axm2snipe-managed notes block (default true)
 	PreserveOrderInfoOnUpdate bool              `yaml:"preserve_order_info_on_update"` // never overwrite existing purchase_date / order_number on update
 	SyncConfiguratorOrderInfo bool              `yaml:"sync_configurator_order_info"`  // sync order_date / order_number even for MANUALLY_ADDED devices (default: skip, since ABM's values for these are Configurator enrollment metadata, not real purchase data)
 }
@@ -148,7 +149,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("reading config file: %w", err)
 	}
 
-	cfg := &Config{}
+	// Preserve the historical behavior unless the user explicitly disables it.
+	cfg := &Config{Sync: SyncConfig{WarrantyNotes: true}}
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config file: %w", err)
 	}

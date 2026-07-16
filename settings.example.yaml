@@ -103,6 +103,11 @@ sync:
   # image cannot be fetched; does not update images on existing models.
   # model_images: false
 
+  # Store every AppleCare coverage record in a managed block in asset Notes.
+  # Custom fields still receive the selected best record when this is false.
+  # Disabling this also removes previously managed blocks without touching manual notes.
+  # warranty_notes: true
+
   # Map ABM supplier to Snipe-IT supplier ID.
   # Keys can be purchaseSourceId (e.g. "1C71B60") or purchaseSourceType (e.g. "APPLE", "MANUALLY_ADDED").
   # Checked before name-based lookup and auto-creation.

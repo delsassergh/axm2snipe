@@ -1167,7 +1167,7 @@ func (e *Engine) createAsset(ctx context.Context, logger *logrus.Entry, device a
 	}
 
 	e.applyFieldMapping(ctx, &asset, device, coverage)
-	applyWarrantyNotes(&asset, coverage)
+	applyWarrantyNotes(&asset, coverage, e.cfg.Sync.WarrantyNotes)
 	// Always use serial as asset tag regardless of field_mapping overrides.
 	asset.AssetTag = attrs.SerialNumber
 
@@ -1230,10 +1230,16 @@ func (e *Engine) updateAsset(ctx context.Context, logger *logrus.Entry, device a
 
 	// Seed notes from existing asset so applyWarrantyNotes replaces only the
 	// sentinel block and leaves any manual notes outside the block intact.
-	desired.Notes = existing.Notes
+	desired.Notes = html.UnescapeString(existing.Notes)
 
 	e.applyFieldMapping(ctx, &desired, device, coverage)
-	applyWarrantyNotes(&desired, coverage)
+	applyWarrantyNotes(&desired, coverage, e.cfg.Sync.WarrantyNotes)
+	// Upstream Asset.MarshalJSON omits an empty Notes string. Flattening an
+	// explicit top-level "notes" value through CustomFields lets Snipe-IT clear
+	// the column when the managed warranty block was the entire notes field.
+	if desired.Notes == "" && desired.Notes != html.UnescapeString(existing.Notes) {
+		desired.CustomFields["notes"] = ""
+	}
 	stripOrderInfoOnUpdate(&desired, existing, e.cfg.Sync.PreserveOrderInfoOnUpdate)
 
 	// Unless force mode, compare desired values against current Snipe-IT values
@@ -1331,8 +1337,14 @@ func (e *Engine) diffAsset(desired *snipeit.Asset, existing *snipeit.Asset) *sni
 	// the warranty block changed.
 	// Snipe-IT HTML-encodes special characters (e.g. "&" → "&amp;") when storing
 	// notes, so unescape the existing value before comparing.
-	if desired.Notes != "" && desired.Notes != html.UnescapeString(existing.Notes) {
-		diff.Notes = desired.Notes
+	if desired.Notes != html.UnescapeString(existing.Notes) {
+		if desired.Notes == "" {
+			// Asset.MarshalJSON omits empty Notes; this is flattened to the same
+			// top-level API key and forces the stored value to be cleared.
+			diff.CustomFields["notes"] = ""
+		} else {
+			diff.Notes = desired.Notes
+		}
 		hasChanges = true
 	}
 
@@ -1550,12 +1562,12 @@ const (
 
 // applyWarrantyNotes writes all AppleCare coverage records into a sentinel-delimited
 // block in asset.Notes, preserving any existing notes outside the block.
-// If coverage is nil or empty, any existing sentinel block is removed.
-func applyWarrantyNotes(asset *snipeit.Asset, coverage *abmclient.CoverageResult) {
+// If disabled, or if coverage is nil or empty, any existing sentinel block is removed.
+func applyWarrantyNotes(asset *snipeit.Asset, coverage *abmclient.CoverageResult, enabled bool) {
 	existing := asset.Notes
 	startIdx := strings.Index(existing, warrantyNotesStart)
 
-	if coverage == nil || len(coverage.All) == 0 {
+	if !enabled || coverage == nil || len(coverage.All) == 0 {
 		// Remove any stale sentinel block so old warranty data is not left behind.
 		if startIdx < 0 {
 			return

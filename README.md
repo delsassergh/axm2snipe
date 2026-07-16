@@ -330,6 +330,7 @@ the service account. Cron uses the target host's local timezone.
 | `sync.use_cache` | Same as `--use-cache` flag |
 | `sync.set_name` | Set asset name to "Model (Color)" on create |
 | `sync.model_images` | Fetch device images from appledb.dev for newly created models (default: false) |
+| `sync.warranty_notes` | Store every AppleCare coverage record in a managed asset Notes block (default: true). Set false to keep only the selected best record in custom fields and remove existing managed blocks while preserving manual notes. |
 | `sync.supplier_mapping` | Map ABM/ASM purchase source IDs/types to Snipe-IT supplier IDs |
 | `sync.field_mapping` | Map Snipe-IT fields to ABM/AppleCare source values |
 | `sync.preserve_order_info_on_update` | Never overwrite existing `purchase_date` / `order_number` on update. First-time syncs still populate them. (default: false) |
@@ -395,7 +396,7 @@ All field mappings are configured in `settings.yaml` under `sync.field_mapping`.
 | `chip` | Chip/SoC name (e.g. "M4") |
 | `model_year` | Year the model was released (e.g. "2024") |
 
-**AppleCare coverage:**
+**AppleCare coverage** (custom fields use the best record, selected by coverage status, payment type, and end date):
 
 | Source value | Description |
 | --- | --- |
